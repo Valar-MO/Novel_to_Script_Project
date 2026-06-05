@@ -11,6 +11,8 @@ from fastapi import (
 )
 from pydantic import BaseModel, WithJsonSchema
 
+from backend.services.text_preprocessor import preprocess_text
+
 
 router = APIRouter(
     prefix="/api/projects",
@@ -20,6 +22,7 @@ router = APIRouter(
 MAX_FILE_COUNT = 50
 MAX_SINGLE_FILE_SIZE = 10 * 1024 * 1024
 MAX_TOTAL_FILE_SIZE = 20 * 1024 * 1024
+PREVIEW_CHARACTER_LIMIT = 300
 
 
 # 兼容新版 FastAPI 与 Swagger UI 的文件选择器显示问题。
@@ -34,6 +37,15 @@ BinaryUploadFile = Annotated[
 ]
 
 
+class TextPreprocessingSummary(BaseModel):
+    """单个文件的文本预处理结果。"""
+
+    original_character_count: int
+    processed_character_count: int
+    processed_line_count: int
+    preview: str
+
+
 class UploadedFileSummary(BaseModel):
     """单个上传文件的统计信息。"""
 
@@ -42,6 +54,7 @@ class UploadedFileSummary(BaseModel):
     size_bytes: int
     character_count: int
     line_count: int
+    preprocessing: TextPreprocessingSummary
 
 
 class ProjectUploadResponse(BaseModel):
@@ -50,8 +63,15 @@ class ProjectUploadResponse(BaseModel):
     project_name: str
     file_count: int
     total_size_bytes: int
+
+    # 原始文本统计。
     total_characters: int
     total_lines: int
+
+    # 预处理后的文本统计。
+    total_processed_characters: int
+    total_processed_lines: int
+
     files: list[UploadedFileSummary]
 
 
@@ -78,7 +98,7 @@ async def upload_project_files(
     """
     接收一个小说项目及其一个或多个 TXT 文件。
 
-    当前接口只完成文件校验、文本读取和统计，
+    当前接口完成文件校验、文本读取、基础预处理和统计，
     不会永久保存文件，也不会执行 AI 分析。
     """
 
@@ -103,9 +123,12 @@ async def upload_project_files(
         )
 
     file_summaries: list[UploadedFileSummary] = []
+
     total_size_bytes = 0
     total_characters = 0
     total_lines = 0
+    total_processed_characters = 0
+    total_processed_lines = 0
 
     for order, uploaded_file in enumerate(files, start=1):
         file_name = uploaded_file.filename or f"file_{order}.txt"
@@ -159,27 +182,50 @@ async def upload_project_files(
                 ),
             ) from error
 
-        if not text.strip():
+        # 对解码后的小说正文进行基础格式规范化。
+        preprocessed = preprocess_text(text)
+
+        if not preprocessed.text:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"文件“{file_name}”不包含有效文本。",
             )
 
-        character_count = len(text)
-        line_count = text.count("\n") + 1
+        original_character_count = len(text)
+        original_line_count = text.count("\n") + 1
 
         file_summaries.append(
             UploadedFileSummary(
                 order=order,
                 file_name=file_name,
                 size_bytes=file_size,
-                character_count=character_count,
-                line_count=line_count,
+                character_count=original_character_count,
+                line_count=original_line_count,
+                preprocessing=TextPreprocessingSummary(
+                    original_character_count=(
+                        preprocessed.original_character_count
+                    ),
+                    processed_character_count=(
+                        preprocessed.processed_character_count
+                    ),
+                    processed_line_count=(
+                        preprocessed.processed_line_count
+                    ),
+                    preview=preprocessed.text[
+                        :PREVIEW_CHARACTER_LIMIT
+                    ],
+                ),
             )
         )
 
-        total_characters += character_count
-        total_lines += line_count
+        total_characters += original_character_count
+        total_lines += original_line_count
+        total_processed_characters += (
+            preprocessed.processed_character_count
+        )
+        total_processed_lines += (
+            preprocessed.processed_line_count
+        )
 
     return ProjectUploadResponse(
         project_name=normalized_project_name,
@@ -187,5 +233,7 @@ async def upload_project_files(
         total_size_bytes=total_size_bytes,
         total_characters=total_characters,
         total_lines=total_lines,
+        total_processed_characters=total_processed_characters,
+        total_processed_lines=total_processed_lines,
         files=file_summaries,
     )
