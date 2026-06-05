@@ -1,3 +1,4 @@
+from collections import Counter
 from pathlib import Path
 from typing import Annotated
 
@@ -11,6 +12,7 @@ from fastapi import (
 )
 from pydantic import BaseModel, WithJsonSchema
 
+from backend.services.text_chunker import chunk_text_by_chapters
 from backend.services.text_preprocessor import preprocess_text
 
 
@@ -23,9 +25,9 @@ MAX_FILE_COUNT = 50
 MAX_SINGLE_FILE_SIZE = 10 * 1024 * 1024
 MAX_TOTAL_FILE_SIZE = 20 * 1024 * 1024
 PREVIEW_CHARACTER_LIMIT = 300
+CHUNK_PREVIEW_CHARACTER_LIMIT = 200
 
 
-# 兼容新版 FastAPI 与 Swagger UI 的文件选择器显示问题。
 BinaryUploadFile = Annotated[
     FastAPIUploadFile,
     WithJsonSchema(
@@ -38,40 +40,71 @@ BinaryUploadFile = Annotated[
 
 
 class TextPreprocessingSummary(BaseModel):
-    """单个文件的文本预处理结果。"""
-
     original_character_count: int
     processed_character_count: int
     processed_line_count: int
     preview: str
 
 
-class UploadedFileSummary(BaseModel):
-    """单个上传文件的统计信息。"""
+class ChapterSummary(BaseModel):
+    chapter_order: int
+    full_title: str | None
+    chapter_title: str | None
+    part_order: int | None
+    part_title: str | None
+    volume_order: int | None
+    volume_title: str | None
+    chapter_number: int | None
+    start_character: int
+    end_character: int
+    character_count: int
+    chunk_count: int
+    is_detected: bool
 
+
+class TextChunkSummary(BaseModel):
+    chunk_id: str
+    global_order: int
+    source_file_name: str
+    source_file_order: int
+    start_character: int
+    end_character: int
+    character_count: int
+    paragraph_start: int
+    paragraph_end: int
+    chapter_order: int | None
+    chapter_number: int | None
+    chapter_title: str | None
+    chapter_full_title: str | None
+    chunk_order_in_chapter: int | None
+    is_chapter_start: bool
+    is_chapter_end: bool
+    preview: str
+
+
+class UploadedFileSummary(BaseModel):
     order: int
     file_name: str
     size_bytes: int
     character_count: int
     line_count: int
     preprocessing: TextPreprocessingSummary
+    chapter_count: int
+    chapters: list[ChapterSummary]
+    chunk_count: int
+    chunks: list[TextChunkSummary]
 
 
 class ProjectUploadResponse(BaseModel):
-    """小说项目上传结果。"""
-
     project_name: str
     file_count: int
     total_size_bytes: int
-
-    # 原始文本统计。
     total_characters: int
     total_lines: int
-
-    # 预处理后的文本统计。
     total_processed_characters: int
     total_processed_lines: int
-
+    total_chapters: int
+    total_chunks: int
     files: list[UploadedFileSummary]
 
 
@@ -79,7 +112,7 @@ class ProjectUploadResponse(BaseModel):
     "/upload",
     response_model=ProjectUploadResponse,
     status_code=status.HTTP_200_OK,
-    summary="上传小说 TXT 文件",
+    summary="上传、识别章节并分块小说 TXT 文件",
 )
 async def upload_project_files(
     project_name: Annotated[
@@ -95,12 +128,7 @@ async def upload_project_files(
         File(description="按照处理顺序上传的 TXT 文件"),
     ],
 ) -> ProjectUploadResponse:
-    """
-    接收一个小说项目及其一个或多个 TXT 文件。
-
-    当前接口完成文件校验、文本读取、基础预处理和统计，
-    不会永久保存文件，也不会执行 AI 分析。
-    """
+    """校验、预处理、识别章节并对小说文本进行可追溯分块。"""
 
     normalized_project_name = project_name.strip()
 
@@ -123,12 +151,14 @@ async def upload_project_files(
         )
 
     file_summaries: list[UploadedFileSummary] = []
-
     total_size_bytes = 0
     total_characters = 0
     total_lines = 0
     total_processed_characters = 0
     total_processed_lines = 0
+    total_chapters = 0
+    total_chunks = 0
+    next_global_chunk_order = 1
 
     for order, uploaded_file in enumerate(files, start=1):
         file_name = uploaded_file.filename or f"file_{order}.txt"
@@ -171,7 +201,6 @@ async def upload_project_files(
             )
 
         try:
-            # 同时兼容普通 UTF-8 和带 BOM 的 UTF-8 文本。
             text = raw_content.decode("utf-8-sig")
         except UnicodeDecodeError as error:
             raise HTTPException(
@@ -182,7 +211,6 @@ async def upload_project_files(
                 ),
             ) from error
 
-        # 对解码后的小说正文进行基础格式规范化。
         preprocessed = preprocess_text(text)
 
         if not preprocessed.text:
@@ -190,6 +218,62 @@ async def upload_project_files(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"文件“{file_name}”不包含有效文本。",
             )
+
+        chunking_result = chunk_text_by_chapters(
+            text=preprocessed.text,
+            source_file_name=file_name,
+            source_file_order=order,
+            global_order_start=next_global_chunk_order,
+        )
+
+        chapters = chunking_result.chapters
+        text_chunks = chunking_result.chunks
+        chunks_per_chapter = Counter(
+            chunk.chapter_order
+            for chunk in text_chunks
+        )
+
+        chapter_summaries = [
+            ChapterSummary(
+                chapter_order=chapter.chapter_order,
+                full_title=chapter.full_title,
+                chapter_title=chapter.chapter_title,
+                part_order=chapter.part_order,
+                part_title=chapter.part_title,
+                volume_order=chapter.volume_order,
+                volume_title=chapter.volume_title,
+                chapter_number=chapter.chapter_number,
+                start_character=chapter.start_character,
+                end_character=chapter.end_character,
+                character_count=chapter.character_count,
+                chunk_count=chunks_per_chapter[chapter.chapter_order],
+                is_detected=chapter.is_detected,
+            )
+            for chapter in chapters
+        ]
+
+        chunk_summaries = [
+            TextChunkSummary(
+                chunk_id=chunk.chunk_id,
+                global_order=chunk.global_order,
+                source_file_name=chunk.source_file_name,
+                source_file_order=chunk.source_file_order,
+                start_character=chunk.start_character,
+                end_character=chunk.end_character,
+                character_count=chunk.character_count,
+                paragraph_start=chunk.paragraph_start,
+                paragraph_end=chunk.paragraph_end,
+                chapter_order=chunk.chapter_order,
+                chapter_number=chunk.chapter_number,
+                chapter_title=chunk.chapter_title,
+                chapter_full_title=chunk.chapter_full_title,
+                chunk_order_in_chapter=chunk.chunk_order_in_chapter,
+                is_chapter_start=chunk.is_chapter_start,
+                is_chapter_end=chunk.is_chapter_end,
+                preview=chunk.text[:CHUNK_PREVIEW_CHARACTER_LIMIT],
+            )
+            for chunk in text_chunks
+        ]
 
         original_character_count = len(text)
         original_line_count = text.count("\n") + 1
@@ -211,21 +295,24 @@ async def upload_project_files(
                     processed_line_count=(
                         preprocessed.processed_line_count
                     ),
-                    preview=preprocessed.text[
-                        :PREVIEW_CHARACTER_LIMIT
-                    ],
+                    preview=preprocessed.text[:PREVIEW_CHARACTER_LIMIT],
                 ),
+                chapter_count=len(chapters),
+                chapters=chapter_summaries,
+                chunk_count=len(text_chunks),
+                chunks=chunk_summaries,
             )
         )
 
+        next_global_chunk_order += len(text_chunks)
         total_characters += original_character_count
         total_lines += original_line_count
         total_processed_characters += (
             preprocessed.processed_character_count
         )
-        total_processed_lines += (
-            preprocessed.processed_line_count
-        )
+        total_processed_lines += preprocessed.processed_line_count
+        total_chapters += len(chapters)
+        total_chunks += len(text_chunks)
 
     return ProjectUploadResponse(
         project_name=normalized_project_name,
@@ -235,5 +322,7 @@ async def upload_project_files(
         total_lines=total_lines,
         total_processed_characters=total_processed_characters,
         total_processed_lines=total_processed_lines,
+        total_chapters=total_chapters,
+        total_chunks=total_chunks,
         files=file_summaries,
     )
