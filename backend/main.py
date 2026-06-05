@@ -1,4 +1,8 @@
+
 from fastapi import FastAPI
+
+from backend.api.projects import router as projects_router
+
 
 app = FastAPI(
     title="Novel2Script API",
@@ -6,10 +10,13 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.include_router(projects_router)
+
 
 @app.get("/api/health", tags=["system"])
 def health_check() -> dict[str, str]:
     """检查后端服务是否正常运行。"""
+
     return {
         "status": "ok",
         "service": "Novel2Script API",
