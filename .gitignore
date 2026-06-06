@@ -14,3 +14,11 @@ data/*.sqlite
 data/*.sqlite3
 data/projects/*
 !data/projects/.gitkeep
+
+# Frontend environment files
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# Keep environment variable template
+!frontend/.env.example

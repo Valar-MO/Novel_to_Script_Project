@@ -1,11 +1,8 @@
-import { useNavigate } from "react-router";
+import { useNavigate } from "react-router-dom";
+
 
 function HomePage() {
   const navigate = useNavigate();
-
-  const handleCreateProject = () => {
-    navigate("/project/new");
-  };
 
   return (
     <div className="app">
@@ -25,13 +22,23 @@ function HomePage() {
             场景卡生成和影视剧本改写。
           </p>
 
-          <button
-            type="button"
-            className="start-button"
-            onClick={handleCreateProject}
-          >
-            创建新项目
-          </button>
+          <div className="hero-actions">
+            <button
+              type="button"
+              className="start-button"
+              onClick={() => navigate("/project/new")}
+            >
+              创建新项目
+            </button>
+
+            <button
+              type="button"
+              className="projects-button"
+              onClick={() => navigate("/projects")}
+            >
+              查看已有项目
+            </button>
+          </div>
         </section>
 
         <section className="workflow">
@@ -63,5 +70,6 @@ function HomePage() {
     </div>
   );
 }
+
 
 export default HomePage;

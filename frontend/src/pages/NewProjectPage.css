@@ -1,0 +1,447 @@
+.new-project-page {
+    min-height: 100vh;
+    padding: 40px;
+    background:
+      radial-gradient(circle at top left, #edf3ff 0, transparent 34%),
+      #f6f7fb;
+    color: #172033;
+  }
+  
+  .new-project-header {
+    width: min(1180px, 100%);
+    margin: 0 auto 28px;
+  }
+  
+  .new-project-back-button,
+  .new-project-text-button {
+    border: 0;
+    background: transparent;
+    color: #53617a;
+    cursor: pointer;
+    font: inherit;
+  }
+  
+  .new-project-back-button {
+    margin-bottom: 28px;
+    padding: 0;
+  }
+  
+  .new-project-header h1 {
+    margin: 4px 0 10px;
+    font-size: clamp(30px, 4vw, 46px);
+    line-height: 1.1;
+  }
+  
+  .new-project-header p {
+    max-width: 720px;
+    margin: 0;
+    color: #69758b;
+    line-height: 1.7;
+  }
+  
+  .new-project-eyebrow {
+    color: #476bd9 !important;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+  
+  .new-project-form {
+    display: grid;
+    width: min(1180px, 100%);
+    margin: 0 auto;
+    gap: 20px;
+  }
+  
+  .new-project-card,
+  .new-project-file-panel,
+  .new-project-preview-panel,
+  .new-project-submit-area {
+    border: 1px solid #e3e7ef;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 14px 40px rgba(38, 50, 78, 0.06);
+  }
+  
+  .new-project-card {
+    padding: 26px;
+  }
+  
+  .new-project-section-heading,
+  .new-project-panel-heading,
+  .new-project-submit-area {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+  }
+  
+  .new-project-section-heading {
+    margin-bottom: 20px;
+  }
+  
+  .new-project-section-heading > div {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  
+  .new-project-section-heading h2,
+  .new-project-panel-heading h2 {
+    margin: 0;
+    font-size: 18px;
+  }
+  
+  .new-project-step {
+    display: grid;
+    width: 34px;
+    height: 34px;
+    place-items: center;
+    border-radius: 10px;
+    background: #edf2ff;
+    color: #476bd9;
+    font-size: 12px;
+    font-weight: 800;
+  }
+  
+  .new-project-text-button {
+    padding: 6px 0;
+  }
+  
+  .new-project-text-button.danger,
+  .new-project-file-actions .danger {
+    color: #c74b55;
+  }
+  
+  .new-project-field {
+    display: grid;
+    gap: 9px;
+  }
+  
+  .new-project-field > span {
+    font-size: 14px;
+    font-weight: 700;
+  }
+  
+  .new-project-field input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid #d8deea;
+    border-radius: 12px;
+    padding: 13px 15px;
+    background: #fbfcff;
+    color: #172033;
+    font: inherit;
+    outline: none;
+  }
+  
+  .new-project-field input:focus {
+    border-color: #6a88e3;
+    box-shadow: 0 0 0 3px rgba(71, 107, 217, 0.12);
+  }
+  
+  .new-project-upload-area {
+    display: grid;
+    min-height: 140px;
+    place-items: center;
+    align-content: center;
+    gap: 8px;
+    border: 1.5px dashed #b8c5e7;
+    border-radius: 16px;
+    background: #f8faff;
+    color: #53617a;
+    cursor: pointer;
+    text-align: center;
+  }
+  
+  .new-project-upload-area:hover {
+    border-color: #6a88e3;
+    background: #f3f6ff;
+  }
+  
+  .new-project-upload-area input {
+    display: none;
+  }
+  
+  .new-project-upload-area strong {
+    color: #24304a;
+  }
+  
+  .new-project-upload-area span {
+    padding: 0 20px;
+    font-size: 13px;
+  }
+  
+  .new-project-stat-grid {
+    display: grid;
+    margin-top: 20px;
+    gap: 12px;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  
+  .new-project-stat-grid > div {
+    display: grid;
+    gap: 4px;
+    border-radius: 12px;
+    padding: 14px;
+    background: #f7f8fc;
+  }
+  
+  .new-project-stat-grid span {
+    color: #7a8497;
+    font-size: 12px;
+  }
+  
+  .new-project-stat-grid strong {
+    font-size: 18px;
+  }
+  
+  .new-project-message {
+    border-radius: 12px;
+    padding: 13px 15px;
+    line-height: 1.6;
+  }
+  
+  .new-project-message p {
+    margin: 0;
+  }
+  
+  .new-project-message.warning {
+    margin-top: 16px;
+    background: #fff7e6;
+    color: #8a6119;
+  }
+  
+  .new-project-message.error {
+    background: #fff0f1;
+    color: #a63642;
+  }
+  
+  .new-project-file-workspace {
+    display: grid;
+    gap: 20px;
+    grid-template-columns: minmax(320px, 0.8fr) minmax(0, 1.2fr);
+  }
+  
+  .new-project-file-panel,
+  .new-project-preview-panel {
+    min-width: 0;
+    overflow: hidden;
+  }
+  
+  .new-project-panel-heading {
+    border-bottom: 1px solid #edf0f5;
+    padding: 18px 20px;
+  }
+  
+  .new-project-panel-heading span {
+    color: #7a8497;
+    font-size: 12px;
+  }
+  
+  .new-project-file-list {
+    display: grid;
+    max-height: 560px;
+    overflow-y: auto;
+  }
+  
+  .new-project-file-item {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid #eff1f5;
+  }
+  
+  .new-project-file-item.selected {
+    background: #f1f5ff;
+  }
+  
+  .new-project-file-main {
+    display: flex;
+    min-width: 0;
+    flex: 1;
+    align-items: center;
+    gap: 12px;
+    border: 0;
+    padding: 14px 10px 14px 16px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    text-align: left;
+  }
+  
+  .new-project-file-order {
+    display: grid;
+    width: 28px;
+    height: 28px;
+    flex: 0 0 auto;
+    place-items: center;
+    border-radius: 8px;
+    background: #e8edfa;
+    color: #476bd9;
+    font-size: 12px;
+    font-weight: 800;
+  }
+  
+  .new-project-file-information {
+    display: grid;
+    min-width: 0;
+    gap: 4px;
+  }
+  
+  .new-project-file-information strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .new-project-file-information small {
+    color: #7a8497;
+  }
+  
+  .new-project-file-actions {
+    display: flex;
+    padding-right: 10px;
+    gap: 4px;
+  }
+  
+  .new-project-file-actions button {
+    display: grid;
+    width: 30px;
+    height: 30px;
+    place-items: center;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    color: #60708b;
+    cursor: pointer;
+  }
+  
+  .new-project-file-actions button:hover:not(:disabled) {
+    background: #e9edf6;
+  }
+  
+  .new-project-file-actions button:disabled {
+    cursor: not-allowed;
+    opacity: 0.35;
+  }
+  
+  .new-project-preview-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 15px 20px 0;
+    color: #69758b;
+    font-size: 13px;
+  }
+  
+  .new-project-preview-meta strong {
+    overflow: hidden;
+    color: #24304a;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .new-project-preview-text {
+    min-height: 360px;
+    max-height: 490px;
+    box-sizing: border-box;
+    margin: 15px 20px 20px;
+    overflow: auto;
+    border-radius: 12px;
+    padding: 18px;
+    background: #f8f9fc;
+    color: #333d50;
+    font-family:
+      "Noto Serif SC",
+      "Songti SC",
+      SimSun,
+      serif;
+    font-size: 15px;
+    line-height: 1.9;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  
+  .new-project-empty {
+    display: grid;
+    min-height: 400px;
+    place-items: center;
+    color: #8a94a7;
+  }
+  
+  .new-project-submit-area {
+    padding: 20px 24px;
+  }
+  
+  .new-project-submit-area > div {
+    display: grid;
+    gap: 4px;
+  }
+  
+  .new-project-submit-area span {
+    color: #7a8497;
+    font-size: 13px;
+  }
+  
+  .new-project-submit-button {
+    min-width: 190px;
+    border: 0;
+    border-radius: 12px;
+    padding: 13px 22px;
+    background: #476bd9;
+    color: white;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 750;
+  }
+  
+  .new-project-submit-button:hover:not(:disabled) {
+    background: #365ac8;
+  }
+  
+  .new-project-submit-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+  }
+  
+  @media (max-width: 900px) {
+    .new-project-page {
+      padding: 24px 16px;
+    }
+  
+    .new-project-file-workspace {
+      grid-template-columns: 1fr;
+    }
+  
+    .new-project-stat-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  
+    .new-project-submit-area {
+      align-items: stretch;
+      flex-direction: column;
+    }
+  
+    .new-project-submit-button {
+      width: 100%;
+    }
+  }
+  
+  @media (max-width: 560px) {
+    .new-project-card {
+      padding: 18px;
+    }
+  
+    .new-project-stat-grid {
+      grid-template-columns: 1fr;
+    }
+  
+    .new-project-file-item {
+      align-items: stretch;
+    }
+  
+    .new-project-file-actions {
+      align-items: center;
+    }
+  }
