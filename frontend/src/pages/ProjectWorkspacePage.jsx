@@ -14,6 +14,10 @@ import {
   getProjectChapter,
   getProjectSummary,
 } from "../api/projects";
+import {
+  getNarrativeAnalysisRun,
+  startNarrativeAnalysis,
+} from "../api/narrativeAnalysis";
 
 import "./ProjectWorkspacePage.css";
 
@@ -110,11 +114,44 @@ function getErrorMessage(error, fallbackMessage) {
 }
 
 
+function getMentionTypeLabel(mentionType) {
+  const labels = {
+    character: "人物",
+    location: "地点",
+    time: "时间",
+    organization: "组织",
+    object: "物件",
+  };
+
+  return labels[mentionType] || mentionType;
+}
+
+
+function getEventTypeLabel(eventType) {
+  const labels = {
+    movement: "移动",
+    communication: "交流",
+    perception: "感知",
+    cognition: "认知",
+    state: "状态",
+    possession: "持有",
+    social: "社会行为",
+    creation: "创建",
+    conflict: "冲突",
+    other: "其他",
+  };
+
+  return labels[eventType] || eventType;
+}
+
+
 function ProjectWorkspacePage() {
   const { projectId } = useParams();
   const navigate = useNavigate();
 
   const chapterCacheRef = useRef(new Map());
+  const readerTextRef = useRef(null);
+  const highlightedEvidenceRef = useRef(null);
 
   const [project, setProject] = useState(null);
   const [projectLoading, setProjectLoading] = useState(true);
@@ -132,6 +169,15 @@ function ProjectWorkspacePage() {
   const [chapterLoading, setChapterLoading] = useState(false);
   const [chapterError, setChapterError] = useState("");
   const [chapterReloadKey, setChapterReloadKey] = useState(0);
+
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisResult, setAnalysisResult] = useState(null);
+  const [analysisError, setAnalysisError] = useState("");
+  const [activeMention, setActiveMention] = useState(null);
+  const [
+    showMentionDebug,
+    setShowMentionDebug,
+  ] = useState(false);
 
   const selectedChapterSummary = useMemo(() => {
     for (const file of project?.files || []) {
@@ -288,6 +334,49 @@ function ProjectWorkspacePage() {
     chapterReloadKey,
   ]);
 
+  useEffect(() => {
+    if (!highlightedEvidenceRef.current) {
+      return;
+    }
+
+    highlightedEvidenceRef.current.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+      inline: "nearest",
+    });
+  }, [activeMention, selectedChapter]);
+
+  const highlightedChapterText = useMemo(() => {
+    const chapterText = selectedChapter?.text || "";
+    const evidenceText = activeMention?.evidence_text || "";
+
+    if (!chapterText || !evidenceText) {
+      return {
+        before: chapterText,
+        match: "",
+        after: "",
+      };
+    }
+
+    const startIndex = chapterText.indexOf(evidenceText);
+
+    if (startIndex < 0) {
+      return {
+        before: chapterText,
+        match: "",
+        after: "",
+      };
+    }
+
+    const endIndex = startIndex + evidenceText.length;
+
+    return {
+      before: chapterText.slice(0, startIndex),
+      match: chapterText.slice(startIndex, endIndex),
+      after: chapterText.slice(endIndex),
+    };
+  }, [activeMention, selectedChapter]);
+
   function toggleFile(fileId) {
     setExpandedFileIds((currentSet) => {
       const nextSet = new Set(currentSet);
@@ -319,6 +408,37 @@ function ProjectWorkspacePage() {
     setChapterReloadKey(
       (currentKey) => currentKey + 1,
     );
+  }
+
+  async function handleStartAnalysis() {
+    setIsAnalyzing(true);
+    setAnalysisError("");
+    setActiveMention(null);
+    setShowMentionDebug(false);
+
+    try {
+      const result = await startNarrativeAnalysis(
+        projectId,
+        {
+          maxChunks: 1,
+          forceReanalyze: false,
+        },
+      );
+
+      const runDetail = await getNarrativeAnalysisRun(
+        result.run_id,
+      );
+
+      setAnalysisResult(runDetail);
+    } catch (error) {
+      setAnalysisError(
+        error instanceof Error
+          ? error.message
+          : "AI 分析失败。",
+      );
+    } finally {
+      setIsAnalyzing(false);
+    }
   }
 
   if (projectLoading) {
@@ -371,6 +491,10 @@ function ProjectWorkspacePage() {
     : selectedChapterSummary
       ? getChapterDisplayName(selectedChapterSummary)
       : "尚未选择章节";
+
+  function handleMentionClick(mention) {
+    setActiveMention(mention);
+  }
 
   return (
     <main className="project-workspace-page">
@@ -427,6 +551,341 @@ function ProjectWorkspacePage() {
             </strong>
           </div>
         </div>
+
+        <section className="project-workspace-analysis">
+          <div className="project-workspace-analysis-heading">
+            <div>
+              <strong>AI 叙事分析</strong>
+              <span>开发阶段默认只分析 1 个文本块</span>
+            </div>
+
+            <button
+              type="button"
+              className="project-workspace-analysis-button"
+              disabled={isAnalyzing}
+              onClick={handleStartAnalysis}
+            >
+              {isAnalyzing
+                ? "正在分析……"
+                : "开始 AI 分析"}
+            </button>
+          </div>
+
+          {analysisError && (
+            <p className="project-workspace-analysis-error">
+              {analysisError}
+            </p>
+          )}
+
+          {analysisResult && (
+            <div className="project-workspace-analysis-summary">
+              <div>
+                <span>状态</span>
+                <strong>{analysisResult.status}</strong>
+              </div>
+
+              <div>
+                <span>批次</span>
+                <strong>{analysisResult.id}</strong>
+              </div>
+
+              <div>
+                <span>文本块</span>
+                <strong>{analysisResult.units?.length ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>成功</span>
+                <strong>
+                  {
+                    (analysisResult.units || []).filter(
+                      (unit) => unit.status === "completed",
+                    ).length
+                  }
+                </strong>
+              </div>
+
+              <div>
+                <span>失败</span>
+                <strong>
+                  {
+                    (analysisResult.units || []).filter(
+                      (unit) => unit.status === "failed",
+                    ).length
+                  }
+                </strong>
+              </div>
+
+              <div>
+                <span>缓存层</span>
+                <strong>{analysisResult.cached_layers ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>缓存块</span>
+                <strong>
+                  {
+                    (analysisResult.units || []).filter(
+                      (unit) => unit.cache_hit,
+                    ).length
+                  }
+                </strong>
+              </div>
+            </div>
+          )}
+
+          {analysisResult?.units?.length > 0 && (
+            <div className="project-workspace-mentions">
+              {analysisResult.units.map((unit) => {
+                const mentions = (
+                  unit.validated_result?.mentions
+                  || unit.result?.mentions
+                  || []
+                );
+                const relations = (
+                  unit.validated_result?.relations
+                  || unit.result?.relations
+                  || []
+                );
+                const eventFrames = (
+                  unit.validated_result?.event_frames
+                  || unit.result?.event_frames
+                  || []
+                );
+                const characterCandidates = (
+                  unit.validated_result?.character_candidates
+                  || unit.result?.character_candidates
+                  || []
+                );
+
+                return (
+                  <section
+                    key={unit.id}
+                    className="project-workspace-mention-unit"
+                  >
+                    <div className="project-workspace-mention-unit-heading">
+                      <strong>{unit.chunk_id}</strong>
+                      <span>{unit.status}</span>
+                    </div>
+
+                    {unit.error_message && (
+                      <p className="project-workspace-analysis-error">
+                        {unit.error_message}
+                      </p>
+                    )}
+
+                    {unit.validated_result?.layer_statuses && (
+                      <div className="project-workspace-layer-statuses">
+                        {Object.entries(
+                          unit.validated_result.layer_statuses,
+                        ).map(([layerName, layerStatus]) => (
+                          <span key={layerName}>
+                            {layerName}
+                            {": "}
+                            {layerStatus}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
+                    {characterCandidates.length > 0 && (
+                      <>
+                        <h4 className="project-workspace-result-title">
+                          人物候选
+                        </h4>
+                        <div className="project-workspace-result-list">
+                          {characterCandidates.map((candidate, index) => (
+                            <button
+                              type="button"
+                              key={
+                                candidate.character_candidate_id
+                                || `${candidate.canonical_name}-${index}`
+                              }
+                              className={
+                                activeMention === candidate
+                                  ? "project-workspace-result-item active"
+                                  : "project-workspace-result-item"
+                              }
+                              onClick={() => {
+                                handleMentionClick(candidate);
+                              }}
+                            >
+                              <strong>{candidate.canonical_name}</strong>
+                              <span>
+                                {
+                                  (
+                                    (candidate.aliases || []).length > 0
+                                      ? candidate.aliases
+                                      : candidate.references || []
+                                  ).join(" / ")
+                                }
+                              </span>
+                              {(candidate.references || []).length > 0 && (
+                                <small>
+                                  references:
+                                  {" "}
+                                  {(candidate.references || []).join(" / ")}
+                                </small>
+                              )}
+                              <small>
+                                置信度
+                                {" "}
+                                {Number(
+                                  candidate.confidence,
+                                ).toFixed(2)}
+                              </small>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {relations.length > 0 && (
+                      <>
+                        <h4 className="project-workspace-result-title">
+                          关系
+                        </h4>
+                        <div className="project-workspace-result-list">
+                          {relations.map((relation, index) => (
+                            <button
+                              type="button"
+                              key={
+                                relation.relation_id
+                                || `${relation.source_mention}-${relation.target_mention}-${index}`
+                              }
+                              className={
+                                activeMention === relation
+                                  ? "project-workspace-result-item active"
+                                  : "project-workspace-result-item"
+                              }
+                              onClick={() => {
+                                handleMentionClick(relation);
+                              }}
+                            >
+                              <strong>
+                                {relation.source_mention}
+                                {" → "}
+                                {relation.target_mention}
+                              </strong>
+                              <span>{relation.relation}</span>
+                              <small>
+                                置信度
+                                {" "}
+                                {Number(
+                                  relation.confidence,
+                                ).toFixed(2)}
+                              </small>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    {eventFrames.length > 0 && (
+                      <>
+                        <h4 className="project-workspace-result-title">
+                          事件
+                        </h4>
+                        <div className="project-workspace-result-list">
+                          {eventFrames.map((eventFrame, index) => (
+                            <button
+                              type="button"
+                              key={
+                                eventFrame.event_frame_id
+                                || `${eventFrame.trigger_text}-${index}`
+                              }
+                              className={
+                                activeMention === eventFrame
+                                  ? "project-workspace-result-item active"
+                                  : "project-workspace-result-item"
+                              }
+                              onClick={() => {
+                                handleMentionClick(eventFrame);
+                              }}
+                            >
+                              <strong>{eventFrame.trigger_text}</strong>
+                              <span>
+                                {getEventTypeLabel(
+                                  eventFrame.event_type,
+                                )}
+                              </span>
+                              <small>
+                                {(eventFrame.arguments || [])
+                                  .map((argument) => (
+                                    `${argument.role}: ${argument.mention_text}`
+                                  ))
+                                  .join(" · ")}
+                              </small>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    )}
+
+                    <div className="project-workspace-debug-heading">
+                      <h4 className="project-workspace-result-title">
+                        文本锚点
+                      </h4>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMentionDebug(
+                            (currentValue) => !currentValue,
+                          );
+                        }}
+                      >
+                        {showMentionDebug ? "隐藏" : "展开"}
+                      </button>
+                    </div>
+
+                    {showMentionDebug && (
+                      mentions.length === 0 ? (
+                        <p className="project-workspace-mention-empty">
+                          未识别到文本锚点
+                        </p>
+                      ) : (
+                        <div className="project-workspace-mention-list">
+                          {mentions.map((mention, index) => (
+                            <button
+                              type="button"
+                              key={`${mention.mention_text}-${index}`}
+                              className={
+                                activeMention === mention
+                                  ? "project-workspace-mention-item active"
+                                  : "project-workspace-mention-item"
+                              }
+                              onClick={() => {
+                                handleMentionClick(mention);
+                              }}
+                            >
+                              <span>
+                                {getMentionTypeLabel(
+                                  mention.mention_type,
+                                )}
+                              </span>
+                              <strong>{mention.mention_text}</strong>
+                              <small>
+                                {mention.evidence_validated === false
+                                  ? "证据未定位"
+                                  : "证据已定位"}
+                                {" · "}
+                                置信度
+                                {" "}
+                                {Number(
+                                  mention.confidence,
+                                ).toFixed(2)}
+                              </small>
+                            </button>
+                          ))}
+                        </div>
+                      )
+                    )}
+                  </section>
+                );
+              })}
+            </div>
+          )}
+        </section>
       </header>
 
       <section className="project-workspace-layout">
@@ -625,8 +1084,20 @@ function ProjectWorkspacePage() {
                   </div>
                 </div>
 
-                <pre className="project-workspace-text">
-                  {selectedChapter.text}
+                <pre
+                  ref={readerTextRef}
+                  className="project-workspace-text"
+                >
+                  {highlightedChapterText.before}
+                  {highlightedChapterText.match ? (
+                    <mark
+                      ref={highlightedEvidenceRef}
+                      className="project-workspace-evidence-highlight"
+                    >
+                      {highlightedChapterText.match}
+                    </mark>
+                  ) : null}
+                  {highlightedChapterText.after}
                 </pre>
               </>
             )}
