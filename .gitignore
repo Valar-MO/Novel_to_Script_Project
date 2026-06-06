@@ -7,3 +7,10 @@ data/raw/
 data/private/
 .DS_Store
 .vscode/
+
+# Novel2Script local project data
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/projects/*
+!data/projects/.gitkeep
