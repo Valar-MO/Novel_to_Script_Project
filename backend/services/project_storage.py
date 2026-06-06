@@ -26,20 +26,13 @@ class ProjectNotFoundError(LookupError):
     """请求的项目不存在。"""
 
 
+class ProjectChunkNotFoundError(LookupError):
+    """请求的项目文本块不存在。"""
+
+
 @dataclass(frozen=True)
 class ProjectFileData:
-    """
-    一个已经完成预处理、章节识别和分块的上传文件。
-
-    raw_content:
-        用户上传的原始二进制文件。
-
-    original_text:
-        UTF-8 解码后的原始文本。
-
-    processed_text:
-        文本预处理后的完整正文。
-    """
+    """一个已经完成预处理、章节识别和分块的上传文件。"""
 
     file_order: int
     file_name: str
@@ -79,8 +72,8 @@ def _serialize_storage_path(path: Path) -> str:
     """
     将存储路径转换为适合写入数据库的字符串。
 
-    默认项目数据目录位于仓库内部时，优先保存相对于
-    项目根目录的路径。测试目录等外部路径则保存绝对路径。
+    位于项目根目录中的路径优先保存为相对路径；
+    测试临时目录等外部路径保存为绝对路径。
     """
 
     resolved_path = path.resolve()
@@ -106,11 +99,14 @@ def _validate_chapters(
     )
 
     if not ordered_chapters:
-        raise ValueError("每个文件必须至少包含一个章节范围。")
+        raise ValueError(
+            "每个文件必须至少包含一个章节范围。"
+        )
 
     expected_orders = list(
         range(1, len(ordered_chapters) + 1)
     )
+
     actual_orders = [
         chapter.chapter_order
         for chapter in ordered_chapters
@@ -158,7 +154,10 @@ def _validate_chapters(
                 "章节范围无法正确对应预处理文本。"
             )
 
-        chapter_by_order[chapter.chapter_order] = chapter
+        chapter_by_order[
+            chapter.chapter_order
+        ] = chapter
+
         expected_start = chapter.end_character
 
     if expected_start != len(processed_text):
@@ -181,12 +180,17 @@ def _validate_chunks(
     )
 
     if not ordered_chunks:
-        raise ValueError("每个文件必须至少包含一个文本块。")
+        raise ValueError(
+            "每个文件必须至少包含一个文本块。"
+        )
 
     expected_start = 0
     seen_chunk_ids: set[str] = set()
 
-    chunks_by_chapter: dict[int, list[TextChunk]] = {
+    chunks_by_chapter: dict[
+        int,
+        list[TextChunk],
+    ] = {
         chapter_order: []
         for chapter_order in chapter_by_order
     }
@@ -199,12 +203,18 @@ def _validate_chunks(
 
         seen_chunk_ids.add(chunk.chunk_id)
 
-        if chunk.source_file_order != file_data.file_order:
+        if (
+            chunk.source_file_order
+            != file_data.file_order
+        ):
             raise ValueError(
                 "文本块记录的文件顺序与当前文件不一致。"
             )
 
-        if chunk.source_file_name != file_data.file_name:
+        if (
+            chunk.source_file_name
+            != file_data.file_name
+        ):
             raise ValueError(
                 "文本块记录的文件名称与当前文件不一致。"
             )
@@ -266,13 +276,16 @@ def _validate_chunks(
                 "文本块范围超出了所属章节范围。"
             )
 
-        chunks_by_chapter[chunk.chapter_order].append(
-            chunk
-        )
+        chunks_by_chapter[
+            chunk.chapter_order
+        ].append(chunk)
 
         expected_start = chunk.end_character
 
-    if expected_start != len(file_data.processed_text):
+    if (
+        expected_start
+        != len(file_data.processed_text)
+    ):
         raise ValueError(
             "文本块没有完整覆盖预处理文本。"
         )
@@ -288,7 +301,8 @@ def _validate_chunks(
         chapter_chunks.sort(
             key=lambda chunk: (
                 chunk.chunk_order_in_chapter
-                if chunk.chunk_order_in_chapter is not None
+                if chunk.chunk_order_in_chapter
+                is not None
                 else 0
             )
         )
@@ -296,6 +310,7 @@ def _validate_chunks(
         expected_chunk_orders = list(
             range(1, len(chapter_chunks) + 1)
         )
+
         actual_chunk_orders = [
             chunk.chunk_order_in_chapter
             for chunk in chapter_chunks
@@ -306,12 +321,15 @@ def _validate_chunks(
                 "章内文本块顺序必须从 1 开始连续递增。"
             )
 
-        if not chapter_chunks[0].is_chapter_start:
+        first_chunk = chapter_chunks[0]
+        last_chunk = chapter_chunks[-1]
+
+        if not first_chunk.is_chapter_start:
             raise ValueError(
                 "章节的第一个文本块必须标记为章节开头。"
             )
 
-        if not chapter_chunks[-1].is_chapter_end:
+        if not last_chunk.is_chapter_end:
             raise ValueError(
                 "章节的最后一个文本块必须标记为章节结尾。"
             )
@@ -337,10 +355,12 @@ def _validate_project_files(
         list[TextChunk],
     ]
 ]:
-    """检查整个项目的文件、章节及文本块数据。"""
+    """检查整个项目的文件、章节和文本块数据。"""
 
     if not files:
-        raise ValueError("项目必须至少包含一个文件。")
+        raise ValueError(
+            "项目必须至少包含一个文件。"
+        )
 
     ordered_files = sorted(
         files,
@@ -350,6 +370,7 @@ def _validate_project_files(
     expected_file_orders = list(
         range(1, len(ordered_files) + 1)
     )
+
     actual_file_orders = [
         file_data.file_order
         for file_data in ordered_files
@@ -372,21 +393,26 @@ def _validate_project_files(
 
     for file_data in ordered_files:
         if not file_data.file_name.strip():
-            raise ValueError("文件名称不能为空。")
+            raise ValueError(
+                "文件名称不能为空。"
+            )
 
         if not file_data.raw_content:
             raise ValueError(
-                f"文件“{file_data.file_name}”没有原始内容。"
+                f"文件“{file_data.file_name}”"
+                "没有原始内容。"
             )
 
         if not file_data.original_text:
             raise ValueError(
-                f"文件“{file_data.file_name}”没有原始文本。"
+                f"文件“{file_data.file_name}”"
+                "没有原始文本。"
             )
 
         if not file_data.processed_text:
             raise ValueError(
-                f"文件“{file_data.file_name}”没有处理后文本。"
+                f"文件“{file_data.file_name}”"
+                "没有处理后文本。"
             )
 
         chapter_by_order = _validate_chapters(
@@ -423,7 +449,8 @@ def _validate_project_files(
 
     if all_global_orders != expected_global_orders:
         raise ValueError(
-            "项目文本块的全局顺序必须从 1 开始连续递增。"
+            "项目文本块的全局顺序必须从 1 "
+            "开始连续递增。"
         )
 
     return validated_files
@@ -440,23 +467,30 @@ def save_project(
     """
     保存一个已经完成预处理和分块的小说项目。
 
-    文件写入和数据库写入作为一个整体处理。任何步骤失败时，
-    会回滚数据库事务并清理本次创建的项目目录。
+    任何步骤失败时，回滚数据库事务，并清理本次创建
+    的临时目录或正式项目目录。
     """
 
     normalized_name = project_name.strip()
 
     if not normalized_name:
-        raise ValueError("项目名称不能为空。")
+        raise ValueError(
+            "项目名称不能为空。"
+        )
 
-    validated_files = _validate_project_files(files)
+    validated_files = _validate_project_files(
+        files
+    )
 
     resolved_project_id = (
-        project_id or str(uuid.uuid4())
+        project_id
+        or str(uuid.uuid4())
     )
 
     if not resolved_project_id.strip():
-        raise ValueError("project_id 不能为空。")
+        raise ValueError(
+            "project_id 不能为空。"
+        )
 
     storage_root = Path(
         projects_directory
@@ -475,7 +509,7 @@ def save_project(
 
     if final_project_directory.exists():
         raise FileExistsError(
-            f"项目目录已经存在："
+            "项目目录已经存在："
             f"{final_project_directory}"
         )
 
@@ -490,6 +524,7 @@ def save_project(
     source_directory = (
         temporary_project_directory / "source"
     )
+
     processed_directory = (
         temporary_project_directory / "processed"
     )
@@ -498,6 +533,7 @@ def save_project(
         len(chapters)
         for _, chapters, _ in validated_files
     )
+
     chunk_count = sum(
         len(chunks)
         for _, _, chunks in validated_files
@@ -508,22 +544,25 @@ def save_project(
             parents=True,
             exist_ok=False,
         )
+
         processed_directory.mkdir(
             parents=True,
             exist_ok=False,
         )
 
-        # 先将文件写入临时项目目录。
         for file_data, _, _ in validated_files:
             stored_file_name = (
                 f"{file_data.file_order:04d}.txt"
             )
 
             temporary_source_path = (
-                source_directory / stored_file_name
+                source_directory
+                / stored_file_name
             )
+
             temporary_processed_path = (
-                processed_directory / stored_file_name
+                processed_directory
+                / stored_file_name
             )
 
             temporary_source_path.write_bytes(
@@ -539,7 +578,6 @@ def save_project(
         with database_session(
             database_path=database_path
         ) as connection:
-            # 确保测试数据库和首次运行数据库已经建表。
             create_schema(connection)
 
             connection.execute(
@@ -578,6 +616,7 @@ def save_project(
                     / "source"
                     / stored_file_name
                 )
+
                 final_processed_path = (
                     final_project_directory
                     / "processed"
@@ -631,46 +670,53 @@ def save_project(
                         "无法取得源文件数据库 ID。"
                     )
 
-                chapter_id_by_order: dict[int, int] = {}
+                chapter_id_by_order: dict[
+                    int,
+                    int,
+                ] = {}
 
                 for chapter in ordered_chapters:
-                    chapter_cursor = connection.execute(
-                        """
-                        INSERT INTO chapters (
-                            source_file_id,
-                            chapter_order,
-                            chapter_number,
-                            chapter_title,
-                            full_title,
-                            part_order,
-                            part_title,
-                            volume_order,
-                            volume_title,
-                            start_character,
-                            end_character,
-                            character_count,
-                            is_detected
+                    chapter_cursor = (
+                        connection.execute(
+                            """
+                            INSERT INTO chapters (
+                                source_file_id,
+                                chapter_order,
+                                chapter_number,
+                                chapter_title,
+                                full_title,
+                                part_order,
+                                part_title,
+                                volume_order,
+                                volume_title,
+                                start_character,
+                                end_character,
+                                character_count,
+                                is_detected
+                            )
+                            VALUES (
+                                ?, ?, ?, ?, ?, ?, ?,
+                                ?, ?, ?, ?, ?, ?
+                            )
+                            """,
+                            (
+                                source_file_id,
+                                chapter.chapter_order,
+                                chapter.chapter_number,
+                                chapter.chapter_title,
+                                chapter.full_title,
+                                chapter.part_order,
+                                chapter.part_title,
+                                chapter.volume_order,
+                                chapter.volume_title,
+                                chapter.start_character,
+                                chapter.end_character,
+                                chapter.character_count,
+                                int(
+                                    chapter.is_detected
+                                ),
+                            ),
                         )
-                        VALUES (
-                            ?, ?, ?, ?, ?, ?, ?,
-                            ?, ?, ?, ?, ?, ?
-                        )
-                        """,
-                        (
-                            source_file_id,
-                            chapter.chapter_order,
-                            chapter.chapter_number,
-                            chapter.chapter_title,
-                            chapter.full_title,
-                            chapter.part_order,
-                            chapter.part_title,
-                            chapter.volume_order,
-                            chapter.volume_title,
-                            chapter.start_character,
-                            chapter.end_character,
-                            chapter.character_count,
-                            int(chapter.is_detected),
-                        ),
                     )
 
                     chapter_database_id = (
@@ -732,12 +778,15 @@ def save_project(
                             chunk.paragraph_start,
                             chunk.paragraph_end,
                             chunk.text,
-                            int(chunk.is_chapter_start),
-                            int(chunk.is_chapter_end),
+                            int(
+                                chunk.is_chapter_start
+                            ),
+                            int(
+                                chunk.is_chapter_end
+                            ),
                         ),
                     )
 
-            # 数据库写入无异常后，把临时目录原子重命名为正式目录。
             temporary_project_directory.replace(
                 final_project_directory
             )
@@ -746,32 +795,39 @@ def save_project(
             project_id=resolved_project_id,
             project_name=normalized_name,
             status=PROJECT_STATUS_PREPROCESSED,
-            project_directory=final_project_directory,
+            project_directory=(
+                final_project_directory
+            ),
             file_count=len(validated_files),
             chapter_count=chapter_count,
             chunk_count=chunk_count,
         )
 
     except Exception:
-        # 无论失败发生在文件写入还是数据库写入阶段，
-        # 都清理本次操作留下的目录。
         shutil.rmtree(
             temporary_project_directory,
             ignore_errors=True,
         )
+
         shutil.rmtree(
             final_project_directory,
             ignore_errors=True,
         )
+
         raise
 
 
-def get_project(
+def get_project_summary(
     project_id: str,
     *,
     database_path: DatabasePath | None = None,
 ) -> dict[str, Any]:
-    """读取一个项目及其文件、章节和文本块。"""
+    """
+    读取项目摘要。
+
+    返回项目、文件、章节和文本块摘要，不返回完整文本块
+    正文，也不在文件层重复返回文本块列表。
+    """
 
     with database_session(
         database_path=database_path
@@ -806,8 +862,6 @@ def get_project(
                 id,
                 file_order,
                 file_name,
-                source_path,
-                processed_path,
                 size_bytes,
                 original_character_count,
                 original_line_count,
@@ -863,7 +917,7 @@ def get_project(
                     character_count,
                     paragraph_start,
                     paragraph_end,
-                    text,
+                    substr(text, 1, 200) AS preview,
                     is_chapter_start,
                     is_chapter_end,
                     created_at
@@ -879,13 +933,12 @@ def get_project(
                 list[dict[str, Any]],
             ] = {}
 
-            chunks: list[dict[str, Any]] = []
-
             for chunk_row in chunk_rows:
-                chunk_data = {
+                chunk_summary = {
                     "id": chunk_row["id"],
-                    "chapter_id": chunk_row["chapter_id"],
-                    "chunk_id": chunk_row["chunk_id"],
+                    "chunk_id": (
+                        chunk_row["chunk_id"]
+                    ),
                     "global_order": (
                         chunk_row["global_order"]
                     ),
@@ -909,42 +962,54 @@ def get_project(
                     "paragraph_end": (
                         chunk_row["paragraph_end"]
                     ),
-                    "text": chunk_row["text"],
+                    "preview": chunk_row["preview"],
                     "is_chapter_start": bool(
-                        chunk_row["is_chapter_start"]
+                        chunk_row[
+                            "is_chapter_start"
+                        ]
                     ),
                     "is_chapter_end": bool(
-                        chunk_row["is_chapter_end"]
+                        chunk_row[
+                            "is_chapter_end"
+                        ]
                     ),
-                    "created_at": chunk_row["created_at"],
+                    "created_at": (
+                        chunk_row["created_at"]
+                    ),
                 }
-
-                chunks.append(chunk_data)
 
                 chunks_by_chapter_id.setdefault(
                     chunk_row["chapter_id"],
                     [],
-                ).append(chunk_data)
+                ).append(chunk_summary)
 
             chapters: list[dict[str, Any]] = []
 
             for chapter_row in chapter_rows:
-                chapter_chunks = chunks_by_chapter_id.get(
-                    chapter_row["id"],
-                    [],
+                chapter_chunks = (
+                    chunks_by_chapter_id.get(
+                        chapter_row["id"],
+                        [],
+                    )
                 )
 
                 chapters.append(
                     {
                         "id": chapter_row["id"],
                         "chapter_order": (
-                            chapter_row["chapter_order"]
+                            chapter_row[
+                                "chapter_order"
+                            ]
                         ),
                         "chapter_number": (
-                            chapter_row["chapter_number"]
+                            chapter_row[
+                                "chapter_number"
+                            ]
                         ),
                         "chapter_title": (
-                            chapter_row["chapter_title"]
+                            chapter_row[
+                                "chapter_title"
+                            ]
                         ),
                         "full_title": (
                             chapter_row["full_title"]
@@ -956,19 +1021,29 @@ def get_project(
                             chapter_row["part_title"]
                         ),
                         "volume_order": (
-                            chapter_row["volume_order"]
+                            chapter_row[
+                                "volume_order"
+                            ]
                         ),
                         "volume_title": (
-                            chapter_row["volume_title"]
+                            chapter_row[
+                                "volume_title"
+                            ]
                         ),
                         "start_character": (
-                            chapter_row["start_character"]
+                            chapter_row[
+                                "start_character"
+                            ]
                         ),
                         "end_character": (
-                            chapter_row["end_character"]
+                            chapter_row[
+                                "end_character"
+                            ]
                         ),
                         "character_count": (
-                            chapter_row["character_count"]
+                            chapter_row[
+                                "character_count"
+                            ]
                         ),
                         "is_detected": bool(
                             chapter_row["is_detected"]
@@ -986,20 +1061,24 @@ def get_project(
             files.append(
                 {
                     "id": source_file_id,
-                    "file_order": file_row["file_order"],
-                    "file_name": file_row["file_name"],
-                    "source_path": file_row["source_path"],
-                    "processed_path": (
-                        file_row["processed_path"]
+                    "file_order": (
+                        file_row["file_order"]
                     ),
-                    "size_bytes": file_row["size_bytes"],
+                    "file_name": (
+                        file_row["file_name"]
+                    ),
+                    "size_bytes": (
+                        file_row["size_bytes"]
+                    ),
                     "original_character_count": (
                         file_row[
                             "original_character_count"
                         ]
                     ),
                     "original_line_count": (
-                        file_row["original_line_count"]
+                        file_row[
+                            "original_line_count"
+                        ]
                     ),
                     "processed_character_count": (
                         file_row[
@@ -1007,13 +1086,16 @@ def get_project(
                         ]
                     ),
                     "processed_line_count": (
-                        file_row["processed_line_count"]
+                        file_row[
+                            "processed_line_count"
+                        ]
                     ),
                     "chapter_count": len(chapters),
-                    "chunk_count": len(chunks),
+                    "chunk_count": len(chunk_rows),
                     "chapters": chapters,
-                    "chunks": chunks,
-                    "created_at": file_row["created_at"],
+                    "created_at": (
+                        file_row["created_at"]
+                    ),
                 }
             )
 
@@ -1024,8 +1106,158 @@ def get_project(
             "created_at": project_row["created_at"],
             "updated_at": project_row["updated_at"],
             "file_count": project_row["file_count"],
-            "chapter_count": project_row["chapter_count"],
+            "chapter_count": (
+                project_row["chapter_count"]
+            ),
             "chunk_count": project_row["chunk_count"],
             "files": files,
+        }
+
+
+def get_project_chunk(
+    project_id: str,
+    chunk_id: str,
+    *,
+    database_path: DatabasePath | None = None,
+) -> dict[str, Any]:
+    """读取指定项目中某个文本块的完整正文和来源信息。"""
+
+    with database_session(
+        database_path=database_path
+    ) as connection:
+        create_schema(connection)
+
+        project_row = connection.execute(
+            """
+            SELECT
+                id,
+                name
+            FROM projects
+            WHERE id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+
+        if project_row is None:
+            raise ProjectNotFoundError(
+                f"项目不存在：{project_id}"
+            )
+
+        chunk_row = connection.execute(
+            """
+            SELECT
+                tc.id,
+                tc.chunk_id,
+                tc.global_order,
+                tc.chunk_order_in_chapter,
+                tc.start_character,
+                tc.end_character,
+                tc.character_count,
+                tc.paragraph_start,
+                tc.paragraph_end,
+                tc.text,
+                tc.is_chapter_start,
+                tc.is_chapter_end,
+                tc.created_at,
+
+                sf.id AS source_file_id,
+                sf.file_order AS source_file_order,
+                sf.file_name AS source_file_name,
+
+                c.id AS chapter_id,
+                c.chapter_order,
+                c.chapter_number,
+                c.chapter_title,
+                c.full_title AS chapter_full_title
+
+            FROM text_chunks AS tc
+
+            INNER JOIN source_files AS sf
+                ON sf.id = tc.source_file_id
+
+            INNER JOIN chapters AS c
+                ON c.id = tc.chapter_id
+
+            WHERE
+                sf.project_id = ?
+                AND tc.chunk_id = ?
+            """,
+            (
+                project_id,
+                chunk_id,
+            ),
+        ).fetchone()
+
+        if chunk_row is None:
+            raise ProjectChunkNotFoundError(
+                f"项目中不存在文本块：{chunk_id}"
+            )
+
+        return {
+            "project_id": project_row["id"],
+            "project_name": project_row["name"],
+
+            "source_file_id": (
+                chunk_row["source_file_id"]
+            ),
+            "source_file_order": (
+                chunk_row["source_file_order"]
+            ),
+            "source_file_name": (
+                chunk_row["source_file_name"]
+            ),
+
+            "chapter_id": chunk_row["chapter_id"],
+            "chapter_order": (
+                chunk_row["chapter_order"]
+            ),
+            "chapter_number": (
+                chunk_row["chapter_number"]
+            ),
+            "chapter_title": (
+                chunk_row["chapter_title"]
+            ),
+            "chapter_full_title": (
+                chunk_row["chapter_full_title"]
+            ),
+
+            "id": chunk_row["id"],
+            "chunk_id": chunk_row["chunk_id"],
+            "global_order": (
+                chunk_row["global_order"]
+            ),
+            "chunk_order_in_chapter": (
+                chunk_row[
+                    "chunk_order_in_chapter"
+                ]
+            ),
+
+            "start_character": (
+                chunk_row["start_character"]
+            ),
+            "end_character": (
+                chunk_row["end_character"]
+            ),
+            "character_count": (
+                chunk_row["character_count"]
+            ),
+
+            "paragraph_start": (
+                chunk_row["paragraph_start"]
+            ),
+            "paragraph_end": (
+                chunk_row["paragraph_end"]
+            ),
+
+            "text": chunk_row["text"],
+
+            "is_chapter_start": bool(
+                chunk_row["is_chapter_start"]
+            ),
+            "is_chapter_end": bool(
+                chunk_row["is_chapter_end"]
+            ),
+
+            "created_at": chunk_row["created_at"],
         }
 
