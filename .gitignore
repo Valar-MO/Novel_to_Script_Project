@@ -22,3 +22,9 @@ frontend/.env.*.local
 
 # Keep environment variable template
 !frontend/.env.example
+
+
+# Backend environment configuration
+.env
+.env.local
+backend/.env
