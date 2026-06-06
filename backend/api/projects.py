@@ -1,3 +1,5 @@
+
+import sqlite3
 from collections import Counter
 from pathlib import Path
 from typing import Annotated
@@ -12,6 +14,12 @@ from fastapi import (
 )
 from pydantic import BaseModel, WithJsonSchema
 
+from backend.services.project_storage import (
+    ProjectFileData,
+    ProjectNotFoundError,
+    get_project,
+    save_project,
+)
 from backend.services.text_chunker import chunk_text_by_chapters
 from backend.services.text_preprocessor import preprocess_text
 
@@ -24,10 +32,12 @@ router = APIRouter(
 MAX_FILE_COUNT = 50
 MAX_SINGLE_FILE_SIZE = 10 * 1024 * 1024
 MAX_TOTAL_FILE_SIZE = 20 * 1024 * 1024
+
 PREVIEW_CHARACTER_LIMIT = 300
 CHUNK_PREVIEW_CHARACTER_LIMIT = 200
 
 
+# 兼容新版 FastAPI 与 Swagger UI 的文件选择器显示问题。
 BinaryUploadFile = Annotated[
     FastAPIUploadFile,
     WithJsonSchema(
@@ -40,6 +50,8 @@ BinaryUploadFile = Annotated[
 
 
 class TextPreprocessingSummary(BaseModel):
+    """单个文件的文本预处理摘要。"""
+
     original_character_count: int
     processed_character_count: int
     processed_line_count: int
@@ -47,72 +59,199 @@ class TextPreprocessingSummary(BaseModel):
 
 
 class ChapterSummary(BaseModel):
+    """单个章节的识别和分块摘要。"""
+
     chapter_order: int
     full_title: str | None
     chapter_title: str | None
+
     part_order: int | None
     part_title: str | None
+
     volume_order: int | None
     volume_title: str | None
+
     chapter_number: int | None
+
     start_character: int
     end_character: int
     character_count: int
+
     chunk_count: int
     is_detected: bool
 
 
 class TextChunkSummary(BaseModel):
+    """单个文本块的接口摘要。"""
+
     chunk_id: str
     global_order: int
+
     source_file_name: str
     source_file_order: int
+
     start_character: int
     end_character: int
     character_count: int
+
     paragraph_start: int
     paragraph_end: int
+
     chapter_order: int | None
     chapter_number: int | None
     chapter_title: str | None
     chapter_full_title: str | None
+
     chunk_order_in_chapter: int | None
+
     is_chapter_start: bool
     is_chapter_end: bool
+
     preview: str
 
 
 class UploadedFileSummary(BaseModel):
+    """单个上传文件的处理结果。"""
+
     order: int
     file_name: str
     size_bytes: int
+
     character_count: int
     line_count: int
+
     preprocessing: TextPreprocessingSummary
+
     chapter_count: int
     chapters: list[ChapterSummary]
+
     chunk_count: int
     chunks: list[TextChunkSummary]
 
 
 class ProjectUploadResponse(BaseModel):
+    """项目创建、文本处理和持久化结果。"""
+
+    project_id: str
     project_name: str
+    status: str
+
     file_count: int
     total_size_bytes: int
+
     total_characters: int
     total_lines: int
+
     total_processed_characters: int
     total_processed_lines: int
+
     total_chapters: int
     total_chunks: int
+
     files: list[UploadedFileSummary]
+
+
+class StoredTextChunkDetail(BaseModel):
+    """数据库中保存的文本块详情。"""
+
+    id: int
+    chapter_id: int
+
+    chunk_id: str
+    global_order: int
+    chunk_order_in_chapter: int
+
+    start_character: int
+    end_character: int
+    character_count: int
+
+    paragraph_start: int
+    paragraph_end: int
+
+    text: str
+
+    is_chapter_start: bool
+    is_chapter_end: bool
+
+    created_at: str
+
+
+class StoredChapterDetail(BaseModel):
+    """数据库中保存的章节详情。"""
+
+    id: int
+    chapter_order: int
+    chapter_number: int | None
+    chapter_title: str | None
+    full_title: str | None
+
+    part_order: int | None
+    part_title: str | None
+
+    volume_order: int | None
+    volume_title: str | None
+
+    start_character: int
+    end_character: int
+    character_count: int
+
+    is_detected: bool
+    chunk_count: int
+
+    chunks: list[StoredTextChunkDetail]
+
+    created_at: str
+
+
+class StoredSourceFileDetail(BaseModel):
+    """数据库中保存的源文件详情。"""
+
+    id: int
+    file_order: int
+    file_name: str
+
+    source_path: str
+    processed_path: str
+
+    size_bytes: int
+
+    original_character_count: int
+    original_line_count: int
+
+    processed_character_count: int
+    processed_line_count: int
+
+    chapter_count: int
+    chunk_count: int
+
+    chapters: list[StoredChapterDetail]
+    chunks: list[StoredTextChunkDetail]
+
+    created_at: str
+
+
+class ProjectDetailResponse(BaseModel):
+    """已保存项目的完整详情。"""
+
+    project_id: str
+    project_name: str
+    status: str
+
+    created_at: str
+    updated_at: str
+
+    file_count: int
+    chapter_count: int
+    chunk_count: int
+
+    files: list[StoredSourceFileDetail]
 
 
 @router.post(
     "/upload",
     response_model=ProjectUploadResponse,
-    status_code=status.HTTP_200_OK,
-    summary="上传、识别章节并分块小说 TXT 文件",
+    status_code=status.HTTP_201_CREATED,
+    summary="上传、处理并保存小说项目",
 )
 async def upload_project_files(
     project_name: Annotated[
@@ -128,7 +267,18 @@ async def upload_project_files(
         File(description="按照处理顺序上传的 TXT 文件"),
     ],
 ) -> ProjectUploadResponse:
-    """校验、预处理、识别章节并对小说文本进行可追溯分块。"""
+    """
+    创建一个新的小说项目。
+
+    处理过程包括：
+
+    1. 校验上传文件；
+    2. 解码和预处理小说文本；
+    3. 识别章节边界；
+    4. 在章节内部执行长文本分块；
+    5. 保存原始文件和处理后文本；
+    6. 保存项目、文件、章节和文本块到 SQLite。
+    """
 
     normalized_project_name = project_name.strip()
 
@@ -151,17 +301,26 @@ async def upload_project_files(
         )
 
     file_summaries: list[UploadedFileSummary] = []
+    storage_files: list[ProjectFileData] = []
+
     total_size_bytes = 0
     total_characters = 0
     total_lines = 0
+
     total_processed_characters = 0
     total_processed_lines = 0
+
     total_chapters = 0
     total_chunks = 0
+
     next_global_chunk_order = 1
 
     for order, uploaded_file in enumerate(files, start=1):
-        file_name = uploaded_file.filename or f"file_{order}.txt"
+        file_name = (
+            uploaded_file.filename
+            or f"file_{order}.txt"
+        )
+
         file_suffix = Path(file_name).suffix.lower()
 
         if file_suffix != ".txt":
@@ -201,6 +360,7 @@ async def upload_project_files(
             )
 
         try:
+            # 同时兼容普通 UTF-8 和带 BOM 的 UTF-8。
             text = raw_content.decode("utf-8-sig")
         except UnicodeDecodeError as error:
             raise HTTPException(
@@ -228,6 +388,23 @@ async def upload_project_files(
 
         chapters = chunking_result.chapters
         text_chunks = chunking_result.chunks
+
+        if not chapters:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"文件“{file_name}”未生成有效章节范围。"
+                ),
+            )
+
+        if not text_chunks:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"文件“{file_name}”未生成有效文本块。"
+                ),
+            )
+
         chunks_per_chapter = Counter(
             chunk.chapter_order
             for chunk in text_chunks
@@ -246,7 +423,9 @@ async def upload_project_files(
                 start_character=chapter.start_character,
                 end_character=chapter.end_character,
                 character_count=chapter.character_count,
-                chunk_count=chunks_per_chapter[chapter.chapter_order],
+                chunk_count=chunks_per_chapter[
+                    chapter.chapter_order
+                ],
                 is_detected=chapter.is_detected,
             )
             for chapter in chapters
@@ -267,16 +446,24 @@ async def upload_project_files(
                 chapter_number=chunk.chapter_number,
                 chapter_title=chunk.chapter_title,
                 chapter_full_title=chunk.chapter_full_title,
-                chunk_order_in_chapter=chunk.chunk_order_in_chapter,
+                chunk_order_in_chapter=(
+                    chunk.chunk_order_in_chapter
+                ),
                 is_chapter_start=chunk.is_chapter_start,
                 is_chapter_end=chunk.is_chapter_end,
-                preview=chunk.text[:CHUNK_PREVIEW_CHARACTER_LIMIT],
+                preview=chunk.text[
+                    :CHUNK_PREVIEW_CHARACTER_LIMIT
+                ],
             )
             for chunk in text_chunks
         ]
 
         original_character_count = len(text)
-        original_line_count = text.count("\n") + 1
+        original_line_count = (
+            text.count("\n") + 1
+            if text
+            else 0
+        )
 
         file_summaries.append(
             UploadedFileSummary(
@@ -295,7 +482,9 @@ async def upload_project_files(
                     processed_line_count=(
                         preprocessed.processed_line_count
                     ),
-                    preview=preprocessed.text[:PREVIEW_CHARACTER_LIMIT],
+                    preview=preprocessed.text[
+                        :PREVIEW_CHARACTER_LIMIT
+                    ],
                 ),
                 chapter_count=len(chapters),
                 chapters=chapter_summaries,
@@ -304,25 +493,108 @@ async def upload_project_files(
             )
         )
 
+        # 将完整处理结果交给项目存储服务。
+        storage_files.append(
+            ProjectFileData(
+                file_order=order,
+                file_name=file_name,
+                raw_content=raw_content,
+                original_text=text,
+                processed_text=preprocessed.text,
+                chapters=chapters,
+                chunks=text_chunks,
+            )
+        )
+
         next_global_chunk_order += len(text_chunks)
+
         total_characters += original_character_count
         total_lines += original_line_count
+
         total_processed_characters += (
             preprocessed.processed_character_count
         )
-        total_processed_lines += preprocessed.processed_line_count
+        total_processed_lines += (
+            preprocessed.processed_line_count
+        )
+
         total_chapters += len(chapters)
         total_chunks += len(text_chunks)
 
+    try:
+        saved_project = save_project(
+            project_name=normalized_project_name,
+            files=storage_files,
+        )
+    except ValueError as error:
+        # 这里通常表示内部生成的数据不满足存储完整性要求。
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="项目数据校验失败，未保存项目。",
+        ) from error
+    except (sqlite3.Error, OSError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="项目保存失败，请稍后重新尝试。",
+        ) from error
+
     return ProjectUploadResponse(
-        project_name=normalized_project_name,
-        file_count=len(file_summaries),
+        project_id=saved_project.project_id,
+        project_name=saved_project.project_name,
+        status=saved_project.status,
+        file_count=saved_project.file_count,
         total_size_bytes=total_size_bytes,
         total_characters=total_characters,
         total_lines=total_lines,
-        total_processed_characters=total_processed_characters,
+        total_processed_characters=(
+            total_processed_characters
+        ),
         total_processed_lines=total_processed_lines,
-        total_chapters=total_chapters,
-        total_chunks=total_chunks,
+        total_chapters=saved_project.chapter_count,
+        total_chunks=saved_project.chunk_count,
         files=file_summaries,
     )
+
+
+@router.get(
+    "/{project_id}",
+    response_model=ProjectDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="查询小说项目详情",
+)
+def read_project(
+    project_id: str,
+) -> ProjectDetailResponse:
+    """
+    根据 project_id 查询已保存的小说项目。
+
+    返回项目基本信息、源文件、章节和完整文本块正文。
+    """
+
+    normalized_project_id = project_id.strip()
+
+    if not normalized_project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="project_id 不能为空。",
+        )
+
+    try:
+        project_data = get_project(
+            normalized_project_id
+        )
+    except ProjectNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在。",
+        ) from error
+    except sqlite3.Error as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="读取项目失败，请稍后重新尝试。",
+        ) from error
+
+    return ProjectDetailResponse.model_validate(
+        project_data
+    )
+
