@@ -19,12 +19,14 @@ LLMProviderName = Literal[
     "ollama",
     "mock",
     "cloud_api",
+    "deepseek",
 ]
 
 SUPPORTED_LLM_PROVIDERS: set[str] = {
     "ollama",
     "mock",
     "cloud_api",
+    "deepseek",
 }
 
 
@@ -48,6 +50,9 @@ class LLMSettings:
     cloud_api_base_url: str | None
     cloud_api_key: str | None
     cloud_api_model: str | None
+    cloud_api_timeout_seconds: float
+    cloud_api_reasoning_effort: str | None
+    cloud_api_thinking_enabled: bool
 
     @property
     def uses_ollama(self) -> bool:
@@ -65,7 +70,10 @@ class LLMSettings:
     def uses_cloud_api(self) -> bool:
         """当前是否配置为云端 API。"""
 
-        return self.provider == "cloud_api"
+        return self.provider in {
+            "cloud_api",
+            "deepseek",
+        }
 
 
 def _read_string(
@@ -107,6 +115,39 @@ def _read_float(
             f"环境变量 {name} 必须是数字，"
             f"当前值为：{raw_value!r}"
         ) from error
+
+
+def _read_bool(
+    name: str,
+    default: bool,
+) -> bool:
+    raw_value = os.getenv(name)
+
+    if raw_value is None or not raw_value.strip():
+        return default
+
+    normalized_value = raw_value.strip().lower()
+
+    if normalized_value in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return True
+
+    if normalized_value in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }:
+        return False
+
+    raise ConfigurationError(
+        f"Environment variable {name} must be a boolean value; "
+        f"got {raw_value!r}."
+    )
 
 
 def _normalize_base_url(url: str) -> str:
@@ -208,24 +249,68 @@ def get_llm_settings() -> LLMSettings:
         or "10m"
     )
 
-    cloud_api_base_url = _read_string(
-        "LLM_API_BASE_URL",
-        None,
+    cloud_api_base_url = (
+        _read_string(
+            "LLM_API_BASE_URL",
+            None,
+        )
+        or _read_string(
+            "DEEPSEEK_BASE_URL",
+            None,
+        )
     )
+
+    if cloud_api_base_url is None and provider_value == "deepseek":
+        cloud_api_base_url = "https://api.deepseek.com"
 
     if cloud_api_base_url is not None:
         cloud_api_base_url = _normalize_base_url(
             cloud_api_base_url
         )
 
-    cloud_api_key = _read_string(
-        "LLM_API_KEY",
+    cloud_api_key = (
+        _read_string(
+            "LLM_API_KEY",
+            None,
+        )
+        or _read_string(
+            "DEEPSEEK_API_KEY",
+            None,
+        )
+    )
+
+    cloud_api_model = (
+        _read_string(
+            "LLM_API_MODEL",
+            None,
+        )
+        or _read_string(
+            "DEEPSEEK_MODEL",
+            None,
+        )
+    )
+
+    if cloud_api_model is None and provider_value == "deepseek":
+        cloud_api_model = "deepseek-v4-pro"
+
+    cloud_api_timeout_seconds = _read_float(
+        "LLM_API_TIMEOUT_SECONDS",
+        180.0,
+    )
+
+    if cloud_api_timeout_seconds <= 0:
+        raise ConfigurationError(
+            "LLM_API_TIMEOUT_SECONDS 蹇呴』澶т簬 0銆?"
+        )
+
+    cloud_api_reasoning_effort = _read_string(
+        "LLM_API_REASONING_EFFORT",
         None,
     )
 
-    cloud_api_model = _read_string(
-        "LLM_API_MODEL",
-        None,
+    cloud_api_thinking_enabled = _read_bool(
+        "LLM_API_THINKING_ENABLED",
+        provider_value == "deepseek",
     )
 
     return LLMSettings(
@@ -240,6 +325,15 @@ def get_llm_settings() -> LLMSettings:
         cloud_api_base_url=cloud_api_base_url,
         cloud_api_key=cloud_api_key,
         cloud_api_model=cloud_api_model,
+        cloud_api_timeout_seconds=(
+            cloud_api_timeout_seconds
+        ),
+        cloud_api_reasoning_effort=(
+            cloud_api_reasoning_effort
+        ),
+        cloud_api_thinking_enabled=(
+            cloud_api_thinking_enabled
+        ),
     )
 
 

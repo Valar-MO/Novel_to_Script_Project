@@ -17,6 +17,9 @@ from backend.llm.base import (
     LLMRequestError,
     LLMResponseValidationError,
 )
+from backend.llm.cloud_api_provider import (
+    CloudAPIProvider,
+)
 from backend.llm.factory import (
     create_llm_provider,
 )
@@ -49,6 +52,9 @@ def build_test_settings(
         cloud_api_base_url=None,
         cloud_api_key=None,
         cloud_api_model=None,
+        cloud_api_timeout_seconds=30.0,
+        cloud_api_reasoning_effort=None,
+        cloud_api_thinking_enabled=False,
     )
 
 
@@ -290,6 +296,7 @@ class TestOllamaProvider(
             request_kwargs["options"],
             {
                 "temperature": 0.0,
+                "num_predict": 2048,
             },
         )
         self.assertIn(
@@ -447,6 +454,7 @@ class TestOllamaProvider(
             repair_kwargs["options"],
             {
                 "temperature": 0,
+                "num_predict": 2048,
             },
         )
         self.assertIn(
@@ -553,6 +561,7 @@ class TestOllamaProvider(
             request_kwargs["options"],
             {
                 "temperature": 0.2,
+                "num_predict": 2048,
             },
         )
 
@@ -769,20 +778,66 @@ class TestLLMProviderFactory(
         # 只关闭客户端，不进行真实网络请求。
         await provider.close()
 
-    async def test_cloud_api_is_reserved_but_not_implemented(
+    async def test_factory_creates_cloud_api_provider(
         self,
     ):
         settings = replace(
             build_test_settings(),
             provider="cloud_api",
+            cloud_api_base_url="https://api.deepseek.com",
+            cloud_api_key="test-key",
+            cloud_api_model="deepseek-v4-pro",
         )
 
-        with self.assertRaises(
-            ConfigurationError
-        ):
-            create_llm_provider(
-                settings=settings
-            )
+        client = SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=AsyncMock()
+                )
+            ),
+            close=AsyncMock(),
+        )
+        provider = CloudAPIProvider(
+            settings=settings,
+            client=client,
+        )
+
+        self.assertIsInstance(
+            provider,
+            CloudAPIProvider,
+        )
+        self.assertEqual(
+            provider.provider_name,
+            "cloud_api",
+        )
+
+        await provider.close()
+
+    async def test_factory_creates_deepseek_provider(
+        self,
+    ):
+        settings = replace(
+            build_test_settings(),
+            provider="deepseek",
+            cloud_api_base_url="https://api.deepseek.com",
+            cloud_api_key="test-key",
+            cloud_api_model="deepseek-v4-pro",
+        )
+
+        provider = create_llm_provider(
+            settings=settings
+        )
+
+        self.assertIsInstance(
+            provider,
+            CloudAPIProvider,
+        )
+        self.assertEqual(
+            provider.provider_name,
+            "deepseek",
+        )
+
+        await provider.close()
 
 
 if __name__ == "__main__":

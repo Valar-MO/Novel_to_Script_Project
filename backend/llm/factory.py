@@ -54,6 +54,15 @@ def create_llm_provider(
             model_name="mock-character-model",
         )
 
+    if resolved_settings.uses_cloud_api:
+        from backend.llm.cloud_api_provider import (
+            CloudAPIProvider,
+        )
+
+        return CloudAPIProvider(
+            settings=resolved_settings
+        )
+
     if (
         resolved_settings.provider
         == "cloud_api"
