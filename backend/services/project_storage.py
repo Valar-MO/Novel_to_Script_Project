@@ -22,6 +22,10 @@ class ProjectNotFoundError(LookupError):
     """请求的项目不存在。"""
 
 
+class ProjectBusyError(RuntimeError):
+    """项目当前存在运行中的任务，暂时不能追加文件。"""
+
+
 class ProjectChunkNotFoundError(LookupError):
     """请求的项目文本块不存在。"""
 
@@ -251,6 +255,9 @@ def _validate_chunks(
 
 def _validate_project_files(
     files: Sequence[ProjectFileData],
+    *,
+    file_order_start: int = 1,
+    global_order_start: int = 1,
 ) -> list[
     tuple[
         ProjectFileData,
@@ -268,11 +275,13 @@ def _validate_project_files(
         key=lambda file_data: file_data.file_order,
     )
 
-    expected_file_orders = list(range(1, len(ordered_files) + 1))
+    expected_file_orders = list(
+        range(file_order_start, file_order_start + len(ordered_files))
+    )
     actual_file_orders = [file_data.file_order for file_data in ordered_files]
 
     if actual_file_orders != expected_file_orders:
-        raise ValueError("文件顺序必须从 1 开始并连续递增。")
+        raise ValueError("文件顺序必须连续递增。")
 
     validated_files: list[
         tuple[
@@ -325,12 +334,190 @@ def _validate_project_files(
             )
         )
 
-    expected_global_orders = list(range(1, len(all_global_orders) + 1))
+    expected_global_orders = list(
+        range(global_order_start, global_order_start + len(all_global_orders))
+    )
 
     if all_global_orders != expected_global_orders:
-        raise ValueError("项目文本块的全局顺序必须从 1 开始连续递增。")
+        raise ValueError("项目文本块的全局顺序必须连续递增。")
 
     return validated_files
+
+
+def _project_directory(
+    *,
+    projects_directory: str | Path | None,
+    project_id: str,
+) -> Path:
+    storage_root = Path(
+        projects_directory
+        if projects_directory is not None
+        else DEFAULT_PROJECTS_DIRECTORY
+    )
+    storage_root.mkdir(parents=True, exist_ok=True)
+    return storage_root / project_id
+
+
+def _write_project_files(
+    *,
+    connection,
+    project_id: str,
+    project_directory: Path,
+    validated_files: list[
+        tuple[
+            ProjectFileData,
+            list[ChapterSpan],
+            list[TextChunk],
+        ]
+    ],
+) -> tuple[int, int]:
+    chapter_count = 0
+    chunk_count = 0
+
+    for file_data, ordered_chapters, ordered_chunks in validated_files:
+        stored_file_name = f"{file_data.file_order:04d}.txt"
+        final_source_path = (
+            project_directory / "source" / stored_file_name
+        )
+        final_processed_path = (
+            project_directory / "processed" / stored_file_name
+        )
+
+        final_source_path.write_bytes(file_data.raw_content)
+        final_processed_path.write_text(
+            file_data.processed_text,
+            encoding="utf-8",
+            newline="\n",
+        )
+
+        source_file_cursor = connection.execute(
+            """
+            INSERT INTO source_files (
+                project_id,
+                file_order,
+                file_name,
+                source_path,
+                processed_path,
+                size_bytes,
+                original_character_count,
+                original_line_count,
+                processed_character_count,
+                processed_line_count
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                file_data.file_order,
+                file_data.file_name,
+                _serialize_storage_path(final_source_path),
+                _serialize_storage_path(final_processed_path),
+                len(file_data.raw_content),
+                len(file_data.original_text),
+                _count_lines(file_data.original_text),
+                len(file_data.processed_text),
+                _count_lines(file_data.processed_text),
+            ),
+        )
+
+        source_file_id = source_file_cursor.lastrowid
+
+        if source_file_id is None:
+            raise RuntimeError("无法取得源文件数据库 ID。")
+
+        chapter_id_by_order: dict[int, int] = {}
+
+        for chapter in ordered_chapters:
+            chapter_cursor = connection.execute(
+                """
+                INSERT INTO chapters (
+                    source_file_id,
+                    chapter_order,
+                    chapter_number,
+                    chapter_title,
+                    full_title,
+                    part_order,
+                    part_title,
+                    volume_order,
+                    volume_title,
+                    start_character,
+                    end_character,
+                    character_count,
+                    is_detected
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_file_id,
+                    chapter.chapter_order,
+                    chapter.chapter_number,
+                    chapter.chapter_title,
+                    chapter.full_title,
+                    chapter.part_order,
+                    chapter.part_title,
+                    chapter.volume_order,
+                    chapter.volume_title,
+                    chapter.start_character,
+                    chapter.end_character,
+                    chapter.character_count,
+                    int(chapter.is_detected),
+                ),
+            )
+
+            chapter_database_id = chapter_cursor.lastrowid
+
+            if chapter_database_id is None:
+                raise RuntimeError("无法取得章节数据库 ID。")
+
+            chapter_id_by_order[chapter.chapter_order] = chapter_database_id
+            chapter_count += 1
+
+        for chunk in ordered_chunks:
+            if chunk.chapter_order is None:
+                raise ValueError("文本块缺少章节顺序。")
+
+            chapter_database_id = chapter_id_by_order[
+                chunk.chapter_order
+            ]
+
+            connection.execute(
+                """
+                INSERT INTO text_chunks (
+                    source_file_id,
+                    chapter_id,
+                    chunk_id,
+                    global_order,
+                    chunk_order_in_chapter,
+                    start_character,
+                    end_character,
+                    character_count,
+                    paragraph_start,
+                    paragraph_end,
+                    text,
+                    is_chapter_start,
+                    is_chapter_end
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    source_file_id,
+                    chapter_database_id,
+                    chunk.chunk_id,
+                    chunk.global_order,
+                    chunk.chunk_order_in_chapter,
+                    chunk.start_character,
+                    chunk.end_character,
+                    chunk.character_count,
+                    chunk.paragraph_start,
+                    chunk.paragraph_end,
+                    chunk.text,
+                    int(chunk.is_chapter_start),
+                    int(chunk.is_chapter_end),
+                ),
+            )
+            chunk_count += 1
+
+    return chapter_count, chunk_count
 
 
 def save_project(
@@ -353,20 +540,20 @@ def save_project(
     if not normalized_name:
         raise ValueError("项目名称不能为空。")
 
-    validated_files = _validate_project_files(files)
+    validated_files = _validate_project_files(
+        files,
+        file_order_start=1,
+        global_order_start=1,
+    )
     resolved_project_id = project_id or str(uuid.uuid4())
 
     if not resolved_project_id.strip():
         raise ValueError("project_id 不能为空。")
 
-    storage_root = Path(
-        projects_directory
-        if projects_directory is not None
-        else DEFAULT_PROJECTS_DIRECTORY
+    final_project_directory = _project_directory(
+        projects_directory=projects_directory,
+        project_id=resolved_project_id,
     )
-
-    storage_root.mkdir(parents=True, exist_ok=True)
-    final_project_directory = storage_root / resolved_project_id
 
     if final_project_directory.exists():
         raise FileExistsError(
@@ -374,7 +561,7 @@ def save_project(
         )
 
     temporary_project_directory = (
-        storage_root
+        final_project_directory.parent
         / f".tmp-{resolved_project_id}-{uuid.uuid4().hex}"
     )
 
@@ -431,141 +618,12 @@ def save_project(
                 ),
             )
 
-            for file_data, ordered_chapters, ordered_chunks in validated_files:
-                stored_file_name = f"{file_data.file_order:04d}.txt"
-                final_source_path = (
-                    final_project_directory / "source" / stored_file_name
-                )
-                final_processed_path = (
-                    final_project_directory / "processed" / stored_file_name
-                )
-
-                source_file_cursor = connection.execute(
-                    """
-                    INSERT INTO source_files (
-                        project_id,
-                        file_order,
-                        file_name,
-                        source_path,
-                        processed_path,
-                        size_bytes,
-                        original_character_count,
-                        original_line_count,
-                        processed_character_count,
-                        processed_line_count
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        resolved_project_id,
-                        file_data.file_order,
-                        file_data.file_name,
-                        _serialize_storage_path(final_source_path),
-                        _serialize_storage_path(final_processed_path),
-                        len(file_data.raw_content),
-                        len(file_data.original_text),
-                        _count_lines(file_data.original_text),
-                        len(file_data.processed_text),
-                        _count_lines(file_data.processed_text),
-                    ),
-                )
-
-                source_file_id = source_file_cursor.lastrowid
-
-                if source_file_id is None:
-                    raise RuntimeError("无法取得源文件数据库 ID。")
-
-                chapter_id_by_order: dict[int, int] = {}
-
-                for chapter in ordered_chapters:
-                    chapter_cursor = connection.execute(
-                        """
-                        INSERT INTO chapters (
-                            source_file_id,
-                            chapter_order,
-                            chapter_number,
-                            chapter_title,
-                            full_title,
-                            part_order,
-                            part_title,
-                            volume_order,
-                            volume_title,
-                            start_character,
-                            end_character,
-                            character_count,
-                            is_detected
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            source_file_id,
-                            chapter.chapter_order,
-                            chapter.chapter_number,
-                            chapter.chapter_title,
-                            chapter.full_title,
-                            chapter.part_order,
-                            chapter.part_title,
-                            chapter.volume_order,
-                            chapter.volume_title,
-                            chapter.start_character,
-                            chapter.end_character,
-                            chapter.character_count,
-                            int(chapter.is_detected),
-                        ),
-                    )
-
-                    chapter_database_id = chapter_cursor.lastrowid
-
-                    if chapter_database_id is None:
-                        raise RuntimeError("无法取得章节数据库 ID。")
-
-                    chapter_id_by_order[
-                        chapter.chapter_order
-                    ] = chapter_database_id
-
-                for chunk in ordered_chunks:
-                    if chunk.chapter_order is None:
-                        raise ValueError("文本块缺少章节顺序。")
-
-                    chapter_database_id = chapter_id_by_order[
-                        chunk.chapter_order
-                    ]
-
-                    connection.execute(
-                        """
-                        INSERT INTO text_chunks (
-                            source_file_id,
-                            chapter_id,
-                            chunk_id,
-                            global_order,
-                            chunk_order_in_chapter,
-                            start_character,
-                            end_character,
-                            character_count,
-                            paragraph_start,
-                            paragraph_end,
-                            text,
-                            is_chapter_start,
-                            is_chapter_end
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            source_file_id,
-                            chapter_database_id,
-                            chunk.chunk_id,
-                            chunk.global_order,
-                            chunk.chunk_order_in_chapter,
-                            chunk.start_character,
-                            chunk.end_character,
-                            chunk.character_count,
-                            chunk.paragraph_start,
-                            chunk.paragraph_end,
-                            chunk.text,
-                            int(chunk.is_chapter_start),
-                            int(chunk.is_chapter_end),
-                        ),
-                    )
+            _write_project_files(
+                connection=connection,
+                project_id=resolved_project_id,
+                project_directory=temporary_project_directory,
+                validated_files=validated_files,
+            )
 
             temporary_project_directory.replace(final_project_directory)
 
@@ -589,6 +647,121 @@ def save_project(
             ignore_errors=True,
         )
         raise
+
+def append_project_files(
+    project_id: str,
+    files: Sequence[ProjectFileData],
+    *,
+    database_path: DatabasePath | None = None,
+    projects_directory: str | Path | None = None,
+) -> dict[str, Any]:
+    if not project_id.strip():
+        raise ValueError("project_id 不能为空。")
+
+    if not files:
+        raise ValueError("至少需要一个待追加文件。")
+
+    with database_session(database_path=database_path) as connection:
+        create_schema(connection)
+
+        project_row = connection.execute(
+            """
+            SELECT id, file_count, chapter_count, chunk_count
+            FROM projects
+            WHERE id = ?
+            """,
+            (project_id,),
+        ).fetchone()
+
+        if project_row is None:
+            raise ProjectNotFoundError(f"项目不存在：{project_id}")
+
+        busy_row = connection.execute(
+            """
+            SELECT 1
+            FROM narrative_analysis_runs
+            WHERE project_id = ?
+              AND status IN ('queued', 'running')
+            UNION ALL
+            SELECT 1
+            FROM script_generation_runs
+            WHERE project_id = ?
+              AND status IN ('queued', 'running')
+            LIMIT 1
+            """,
+            (project_id, project_id),
+        ).fetchone()
+
+        if busy_row is not None:
+            raise ProjectBusyError("项目当前存在运行中的任务，暂时不能追加文件。")
+
+        next_file_order = int(project_row["file_count"]) + 1
+        next_global_order = int(project_row["chunk_count"]) + 1
+
+    validated_files = _validate_project_files(
+        files,
+        file_order_start=next_file_order,
+        global_order_start=next_global_order,
+    )
+
+    project_directory = _project_directory(
+        projects_directory=projects_directory,
+        project_id=project_id,
+    )
+    source_directory = project_directory / "source"
+    processed_directory = project_directory / "processed"
+
+    if not source_directory.exists() or not processed_directory.exists():
+        raise FileNotFoundError(f"项目目录不完整：{project_directory}")
+
+    added_chunk_ids = [
+        chunk.chunk_id
+        for _, _, ordered_chunks in validated_files
+        for chunk in ordered_chunks
+    ]
+
+    try:
+        with database_session(database_path=database_path) as connection:
+            create_schema(connection)
+            added_chapter_count, added_chunk_count = _write_project_files(
+                connection=connection,
+                project_id=project_id,
+                project_directory=project_directory,
+                validated_files=validated_files,
+            )
+            connection.execute(
+                """
+                UPDATE projects
+                SET file_count = file_count + ?,
+                    chapter_count = chapter_count + ?,
+                    chunk_count = chunk_count + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    len(validated_files),
+                    added_chapter_count,
+                    added_chunk_count,
+                    project_id,
+                ),
+            )
+    except Exception:
+        for file_data, _, _ in validated_files:
+            stored_file_name = f"{file_data.file_order:04d}.txt"
+            (source_directory / stored_file_name).unlink(missing_ok=True)
+            (processed_directory / stored_file_name).unlink(missing_ok=True)
+        raise
+
+    return {
+        "project_id": project_id,
+        "added_file_count": len(validated_files),
+        "added_chapter_count": sum(
+            len(ordered_chapters)
+            for _, ordered_chapters, _ in validated_files
+        ),
+        "added_chunk_count": len(added_chunk_ids),
+        "added_chunk_ids": added_chunk_ids,
+    }
 
 
 

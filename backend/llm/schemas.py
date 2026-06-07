@@ -507,3 +507,167 @@ class CharacterCandidateExtractionOutput(BaseModel):
             for item in value
             if item is not None
         ])
+
+
+class GeneratedCharacterRef(BaseModel):
+    """A character used in a generated script scene."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    character_id: str | None = Field(
+        default=None,
+        max_length=120,
+    )
+    name: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        normalized_value = _normalize_text(value)
+        if not normalized_value:
+            raise ValueError("name cannot be empty.")
+        return normalized_value
+
+    @field_validator("character_id")
+    @classmethod
+    def normalize_character_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized_value = _normalize_text(value)
+        return normalized_value or None
+
+
+class GeneratedSourceAnchor(BaseModel):
+    """Text anchors used by the backend to locate source offsets."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    start_text: str = Field(
+        min_length=1,
+        max_length=500,
+    )
+    end_text: str = Field(
+        min_length=1,
+        max_length=500,
+    )
+
+    @field_validator("start_text", "end_text")
+    @classmethod
+    def normalize_anchor_text(cls, value: str) -> str:
+        stripped = _strip_text(value)
+        if not stripped:
+            raise ValueError("source anchors cannot be empty.")
+        return stripped
+
+
+class GeneratedScene(BaseModel):
+    """One scene generated from the current source chunk."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+    )
+
+    order_in_unit: int = Field(
+        ge=1,
+    )
+    continue_previous_scene: bool = False
+    interior_exterior: str = Field(
+        min_length=1,
+        max_length=40,
+    )
+    location: str = Field(
+        min_length=1,
+        max_length=200,
+    )
+    time_of_day: str = Field(
+        min_length=1,
+        max_length=80,
+    )
+    heading: str = Field(
+        min_length=1,
+        max_length=300,
+    )
+    characters: list[GeneratedCharacterRef] = Field(
+        default_factory=list,
+    )
+    script_text: str = Field(
+        min_length=1,
+        max_length=20000,
+    )
+    scene_summary: str = Field(
+        default="",
+        max_length=2000,
+    )
+    source_anchor: GeneratedSourceAnchor
+    adaptation_notes: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @field_validator(
+        "interior_exterior",
+        "location",
+        "time_of_day",
+        "heading",
+        "scene_summary",
+    )
+    @classmethod
+    def normalize_text_fields(cls, value: str) -> str:
+        return _normalize_text(value)
+
+    @field_validator("script_text")
+    @classmethod
+    def normalize_script_text(cls, value: str) -> str:
+        stripped = _strip_text(value)
+        if not stripped:
+            raise ValueError("script_text cannot be empty.")
+        return stripped
+
+    @field_validator("adaptation_notes", "warnings", mode="before")
+    @classmethod
+    def normalize_string_list(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            raise ValueError("field must be a string list.")
+        return _deduplicate_strings([
+            str(item)
+            for item in value
+            if item is not None
+        ])
+
+
+class ScriptGenerationOutput(BaseModel):
+    """Script scenes generated from one source chunk."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+
+    scenes: list[GeneratedScene] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @field_validator("warnings", mode="before")
+    @classmethod
+    def normalize_warnings(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, list):
+            raise ValueError("warnings must be a string list.")
+        return _deduplicate_strings([
+            str(item)
+            for item in value
+            if item is not None
+        ])

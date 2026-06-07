@@ -11,6 +11,8 @@ import {
 
 import {
   ApiError,
+  appendProjectFiles,
+  getProjectChunk,
   getProjectChapter,
   getProjectSummary,
 } from "../api/projects";
@@ -21,6 +23,15 @@ import {
   retryFailedNarrativeAnalysis,
   startNarrativeAnalysis,
 } from "../api/narrativeAnalysis";
+import {
+  cancelScriptGeneration,
+  getProjectScriptGenerationState,
+  getScriptGenerationRun,
+  getScriptGenerationScenes,
+  regenerateScriptScene,
+  startScriptGeneration,
+  updateScriptScene,
+} from "../api/scriptGeneration";
 
 import "./ProjectWorkspacePage.css";
 
@@ -33,6 +44,19 @@ const ANALYSIS_TERMINAL_STATUSES = new Set([
 ]);
 
 const ANALYSIS_ACTIVE_STATUSES = new Set([
+  "queued",
+  "running",
+]);
+
+const SCRIPT_TERMINAL_STATUSES = new Set([
+  "completed",
+  "partial",
+  "failed",
+  "interrupted",
+  "cancelled",
+]);
+
+const SCRIPT_ACTIVE_STATUSES = new Set([
   "queued",
   "running",
 ]);
@@ -161,6 +185,63 @@ function getEventTypeLabel(eventType) {
 }
 
 
+function buildEditedCharacters(text, originalCharacters = []) {
+  const originalByName = new Map(
+    originalCharacters.map((character) => [
+      character.name.trim(),
+      character,
+    ]),
+  );
+
+  const names = [
+    ...new Set(
+      text
+        .split(/[、，,\n]/)
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  return names.map((name) => ({
+    character_id: originalByName.get(name)?.character_id ?? null,
+    name,
+  }));
+}
+
+
+function getScriptActionLabel(scriptState) {
+  switch (scriptState?.suggested_action) {
+    case "continue_new":
+      return "继续生成新增内容";
+    case "continue_remaining":
+      return "继续生成剩余内容";
+    case "continue_pending":
+      return "继续生成待处理内容";
+    case "all_generated":
+      return "重新生成剧本";
+    case "running":
+      return "生成中……";
+    case "cancelling":
+      return "正在取消……";
+    case "generate_all":
+    default:
+      return "生成剧本";
+  }
+}
+
+
+function getScriptStartScope(scriptState) {
+  switch (scriptState?.suggested_action) {
+    case "continue_new":
+    case "continue_remaining":
+    case "continue_pending":
+      return "pending";
+    default:
+      return "all";
+  }
+}
+
+
 function ProjectWorkspacePage() {
   const { projectId } = useParams();
   const navigate = useNavigate();
@@ -194,6 +275,28 @@ function ProjectWorkspacePage() {
     showMentionDebug,
     setShowMentionDebug,
   ] = useState(false);
+  const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [isCancellingScript, setIsCancellingScript] = useState(false);
+  const [scriptState, setScriptState] = useState(null);
+  const [scriptRun, setScriptRun] = useState(null);
+  const [scriptScenes, setScriptScenes] = useState([]);
+  const [scriptError, setScriptError] = useState("");
+  const [appendFilesBusy, setAppendFilesBusy] = useState(false);
+  const [appendFilesMessage, setAppendFilesMessage] = useState("");
+  const [selectedScriptSceneId, setSelectedScriptSceneId] = useState(null);
+  const [editingSceneId, setEditingSceneId] = useState(null);
+  const [sceneDraft, setSceneDraft] = useState({
+    heading: "",
+    interiorExterior: "",
+    location: "",
+    timeOfDay: "",
+    charactersText: "",
+    scriptText: "",
+  });
+  const [regeneratingSceneId, setRegeneratingSceneId] = useState(null);
+  const [regenerateInstruction, setRegenerateInstruction] = useState("");
+  const [scriptModel, setScriptModel] = useState("deepseek-v4-pro");
+  const [scriptThinkingEnabled, setScriptThinkingEnabled] = useState(false);
 
   const selectedChapterSummary = useMemo(() => {
     for (const file of project?.files || []) {
@@ -208,6 +311,40 @@ function ProjectWorkspacePage() {
 
     return null;
   }, [project, selectedChapterId]);
+
+  async function refreshProjectSummary() {
+    const projectData = await getProjectSummary(projectId);
+    setProject(projectData);
+    setExpandedFileIds(
+      new Set(projectData.files.map((file) => file.id)),
+    );
+    return projectData;
+  }
+
+  async function refreshScriptGenerationState() {
+    const state = await getProjectScriptGenerationState(projectId);
+    setScriptState(state);
+
+    if (state.latest_run) {
+      setScriptRun(state.latest_run);
+
+      if (state.latest_run.id) {
+        const scenesData = await getScriptGenerationScenes(
+          state.latest_run.id,
+        );
+        setScriptScenes(scenesData.scenes || []);
+        setSelectedScriptSceneId((currentId) => (
+          currentId || scenesData.scenes?.[0]?.id || null
+        ));
+      }
+    } else {
+      setScriptRun(null);
+      setScriptScenes([]);
+      setSelectedScriptSceneId(null);
+    }
+
+    return state;
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -391,6 +528,73 @@ function ProjectWorkspacePage() {
   ]);
 
   useEffect(() => {
+    if (projectLoading || projectError) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+
+    getProjectScriptGenerationState(projectId, {
+      signal: controller.signal,
+    })
+      .then(async (state) => {
+        setScriptState(state);
+        setIsGeneratingScript(
+          SCRIPT_ACTIVE_STATUSES.has(state.latest_run?.status),
+        );
+        setIsCancellingScript(
+          Boolean(
+            state.latest_run?.cancel_requested_at
+            && !state.latest_run?.cancelled_at,
+          ),
+        );
+
+        if (!state.latest_run) {
+          setScriptRun(null);
+          setScriptScenes([]);
+          setSelectedScriptSceneId(null);
+          return;
+        }
+
+        setScriptRun(state.latest_run);
+
+        const scenesData = await getScriptGenerationScenes(
+          state.latest_run.id,
+          {
+            signal: controller.signal,
+          },
+        );
+        setScriptScenes(scenesData.scenes || []);
+        setSelectedScriptSceneId((currentId) => (
+          currentId || scenesData.scenes?.[0]?.id || null
+        ));
+      })
+      .catch((error) => {
+        if (
+          error instanceof DOMException
+          && error.name === "AbortError"
+        ) {
+          return;
+        }
+
+        setScriptError(
+          getErrorMessage(
+            error,
+            "读取剧本生成状态失败。",
+          ),
+        );
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [
+    projectId,
+    projectLoading,
+    projectError,
+  ]);
+
+  useEffect(() => {
     const runId = analysisResult?.id || analysisResult?.run_id;
 
     if (!runId || !ANALYSIS_ACTIVE_STATUSES.has(analysisResult.status)) {
@@ -464,6 +668,96 @@ function ProjectWorkspacePage() {
   ]);
 
   useEffect(() => {
+    const runId = scriptRun?.id || scriptRun?.run_id;
+
+    if (scriptRun?.status && SCRIPT_TERMINAL_STATUSES.has(scriptRun.status)) {
+      setIsGeneratingScript(false);
+    }
+
+    if (!runId || !SCRIPT_ACTIVE_STATUSES.has(scriptRun.status)) {
+      return undefined;
+    }
+
+    let timeoutId = null;
+    const controller = new AbortController();
+
+    async function pollScriptRun() {
+      try {
+        const runDetail = await getScriptGenerationRun(
+          runId,
+          {
+            includeUnits: false,
+            signal: controller.signal,
+          },
+        );
+
+        setScriptRun((current) => ({
+          ...(current || {}),
+          ...runDetail,
+          units: current?.units || [],
+        }));
+
+        const scenesData = await getScriptGenerationScenes(
+          runId,
+          {
+            signal: controller.signal,
+          },
+        );
+        setScriptScenes(scenesData.scenes || []);
+        setSelectedScriptSceneId((currentId) => (
+          currentId || scenesData.scenes?.[0]?.id || null
+        ));
+
+        if (SCRIPT_TERMINAL_STATUSES.has(runDetail.status)) {
+          const runWithUnits = await getScriptGenerationRun(
+            runId,
+            {
+              includeUnits: true,
+              signal: controller.signal,
+            },
+          );
+          setScriptRun(runWithUnits);
+          setIsGeneratingScript(false);
+          setIsCancellingScript(false);
+          return;
+        }
+
+        setIsGeneratingScript(true);
+        timeoutId = window.setTimeout(pollScriptRun, 2500);
+      } catch (error) {
+        if (
+          error instanceof DOMException
+          && error.name === "AbortError"
+        ) {
+          return;
+        }
+
+        setIsGeneratingScript(false);
+        setScriptError(
+          getErrorMessage(
+            error,
+            "刷新剧本生成进度失败。",
+          ),
+        );
+      }
+    }
+
+    timeoutId = window.setTimeout(pollScriptRun, 800);
+
+    return () => {
+      controller.abort();
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [
+    scriptRun?.id,
+    scriptRun?.run_id,
+    scriptRun?.status,
+  ]);
+
+  useEffect(() => {
     if (!highlightedEvidenceRef.current) {
       return;
     }
@@ -505,6 +799,12 @@ function ProjectWorkspacePage() {
       after: chapterText.slice(endIndex),
     };
   }, [activeMention, selectedChapter]);
+
+  const selectedScriptScene = useMemo(() => (
+    scriptScenes.find((scene) => scene.id === selectedScriptSceneId)
+    || scriptScenes[0]
+    || null
+  ), [scriptScenes, selectedScriptSceneId]);
 
   function toggleFile(fileId) {
     setExpandedFileIds((currentSet) => {
@@ -626,6 +926,247 @@ function ProjectWorkspacePage() {
     }
   }
 
+  async function refreshScriptScenes(runId) {
+    const scenesData = await getScriptGenerationScenes(runId);
+    setScriptScenes(scenesData.scenes || []);
+    setSelectedScriptSceneId((currentId) => (
+      currentId || scenesData.scenes?.[0]?.id || null
+    ));
+  }
+
+  async function handleStartScriptGeneration() {
+    setIsGeneratingScript(true);
+    setScriptError("");
+    setScriptScenes([]);
+    setSelectedScriptSceneId(null);
+    setEditingSceneId(null);
+
+    try {
+      const result = await startScriptGeneration(
+        projectId,
+        {
+          scope: getScriptStartScope(scriptState),
+          maxChunks: null,
+          generationStyle: "standard",
+          adaptationMode: "faithful",
+          provider: "deepseek",
+          model: scriptModel,
+          thinkingEnabled: scriptThinkingEnabled,
+        },
+      );
+
+      setScriptRun({
+        id: result.run_id,
+        ...result,
+        units: [],
+      });
+      await refreshScriptGenerationState();
+    } catch (error) {
+      try {
+        const state = await refreshScriptGenerationState();
+        const latestRun = state?.latest_run;
+
+        if (
+          latestRun
+          && SCRIPT_ACTIVE_STATUSES.has(latestRun.status)
+        ) {
+          setIsGeneratingScript(true);
+          setIsCancellingScript(
+            Boolean(
+              latestRun.cancel_requested_at
+              && !latestRun.cancelled_at,
+            ),
+          );
+          setScriptError("");
+          return;
+        }
+      } catch {
+        // Fall through to the original start error.
+      }
+
+      setIsGeneratingScript(false);
+      setScriptError(
+        getErrorMessage(
+          error,
+          "启动剧本生成失败。",
+        ),
+      );
+    }
+  }
+
+  async function handleCancelScriptGeneration() {
+    const runId = scriptRun?.id || scriptRun?.run_id;
+
+    if (!runId) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "确定要取消当前剧本生成吗？当前正在处理的文本块会先完成，然后停止后续生成。",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsCancellingScript(true);
+    setScriptError("");
+
+    try {
+      await cancelScriptGeneration(runId);
+      await refreshScriptGenerationState();
+    } catch (error) {
+      setScriptError(
+        getErrorMessage(
+          error,
+          "取消剧本生成失败。",
+        ),
+      );
+      setIsCancellingScript(false);
+    }
+  }
+
+  function handleSelectScriptScene(scene) {
+    setSelectedScriptSceneId(scene.id);
+    setActiveMention(null);
+  }
+
+  async function handleViewScriptSceneSource(scene) {
+    const firstSource = scene.source_spans?.[0];
+    if (!firstSource?.evidence_text) {
+      return;
+    }
+
+    setActiveMention({
+      evidence_text: firstSource.evidence_text,
+    });
+
+    if (firstSource.chunk_id) {
+      try {
+        const chunk = await getProjectChunk(
+          projectId,
+          firstSource.chunk_id,
+        );
+
+        if (chunk?.chapter_id && chunk.chapter_id !== selectedChapterId) {
+          setSelectedChapterId(chunk.chapter_id);
+          setChapterReloadKey(0);
+        }
+      } catch (error) {
+        setScriptError(
+          getErrorMessage(
+            error,
+            "读取场景对应原文失败。",
+          ),
+        );
+      }
+    }
+  }
+
+  function handleStartSceneEdit(scene) {
+    setEditingSceneId(scene.id);
+    setSceneDraft({
+      heading: scene.heading,
+      interiorExterior: scene.interior_exterior,
+      location: scene.location,
+      timeOfDay: scene.time_of_day,
+      charactersText: (scene.characters || [])
+        .map((character) => character.name)
+        .join("、"),
+      scriptText: scene.script_text,
+    });
+  }
+
+  function handleCancelSceneEdit() {
+    setEditingSceneId(null);
+    setSceneDraft({
+      heading: "",
+      interiorExterior: "",
+      location: "",
+      timeOfDay: "",
+      charactersText: "",
+      scriptText: "",
+    });
+  }
+
+  async function handleSaveScene(scene) {
+    setScriptError("");
+
+    try {
+      const updatedScene = await updateScriptScene(
+        scene.id,
+        {
+          heading: sceneDraft.heading,
+          interiorExterior: sceneDraft.interiorExterior,
+          location: sceneDraft.location,
+          timeOfDay: sceneDraft.timeOfDay,
+          scriptText: sceneDraft.scriptText,
+          characters: buildEditedCharacters(
+            sceneDraft.charactersText,
+            scene.characters,
+          ),
+          warnings: scene.warnings,
+        },
+      );
+
+      setScriptScenes((currentScenes) => (
+        currentScenes.map((item) => (
+          item.id === updatedScene.id ? updatedScene : item
+        ))
+      ));
+      setSelectedScriptSceneId(updatedScene.id);
+      handleCancelSceneEdit();
+    } catch (error) {
+      setScriptError(
+        getErrorMessage(
+          error,
+          "保存剧本场景失败。",
+        ),
+      );
+    }
+  }
+
+  async function handleRegenerateScene(scene) {
+    if (scene.is_user_edited) {
+      const confirmed = window.confirm(
+        "当前场景包含人工修改，重新生成将覆盖这些内容。",
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    setScriptError("");
+    setRegeneratingSceneId(scene.id);
+
+    try {
+      const regeneratedScene = await regenerateScriptScene(
+        scene.id,
+        {
+          instruction: regenerateInstruction,
+        },
+      );
+
+      setScriptScenes((currentScenes) => (
+        currentScenes.map((item) => (
+          item.id === regeneratedScene.id ? regeneratedScene : item
+        ))
+      ));
+      setSelectedScriptSceneId(regeneratedScene.id);
+      setRegenerateInstruction("");
+    } catch (error) {
+      setScriptError(
+        getErrorMessage(
+          error,
+          "重新生成剧本场景失败。",
+        ),
+      );
+    } finally {
+      setRegeneratingSceneId(null);
+    }
+  }
+
   if (projectLoading) {
     return (
       <main className="project-workspace-state-page">
@@ -680,6 +1221,68 @@ function ProjectWorkspacePage() {
   function handleMentionClick(mention) {
     setActiveMention(mention);
   }
+
+  const appendFilesControl = (
+    <div className="project-workspace-append-files">
+      <label
+        className={
+          appendFilesBusy || isGeneratingScript || isCancellingScript
+            ? "project-workspace-append-files-button disabled"
+            : "project-workspace-append-files-button"
+        }
+      >
+        <span>
+          {appendFilesBusy ? "正在追加..." : "追加小说文件"}
+        </span>
+        <small>用于生成新增内容</small>
+        <input
+          type="file"
+          accept=".txt"
+          multiple
+          disabled={appendFilesBusy || isGeneratingScript || isCancellingScript}
+          onChange={async (event) => {
+            const selectedFiles = Array.from(event.target.files || []);
+            event.target.value = "";
+
+            if (selectedFiles.length === 0) {
+              return;
+            }
+
+            setAppendFilesBusy(true);
+            setAppendFilesMessage("");
+            setScriptError("");
+
+            try {
+              const result = await appendProjectFiles(
+                projectId,
+                selectedFiles,
+              );
+              await refreshProjectSummary();
+              await refreshScriptGenerationState();
+              setAppendFilesMessage(
+                `已追加 ${result.added_file_count} 个文件，新增 ${result.added_chunk_count} 个文本块。`,
+              );
+            } catch (error) {
+              setAppendFilesMessage(
+                getErrorMessage(
+                  error,
+                  "追加文件失败。",
+                ),
+              );
+            } finally {
+              setAppendFilesBusy(false);
+            }
+          }}
+        />
+      </label>
+
+      {appendFilesMessage && (
+        <p className="project-workspace-append-files-message">
+          {appendFilesMessage}
+        </p>
+      )}
+    </div>
+  );
 
   return (
     <main className="project-workspace-page">
@@ -1088,6 +1691,334 @@ function ProjectWorkspacePage() {
             </div>
           )}
         </section>
+
+        <section className="project-workspace-script">
+          <div className="project-workspace-analysis-heading">
+            <div>
+              <strong>剧本场景生成</strong>
+              <span>直接根据小说文本块生成可编辑剧本场景</span>
+            </div>
+
+            <div className="project-workspace-script-primary-actions">
+              <button
+                type="button"
+                className="project-workspace-analysis-button"
+                disabled={
+                  isGeneratingScript
+                  || isCancellingScript
+                }
+                onClick={handleStartScriptGeneration}
+              >
+                {getScriptActionLabel(scriptState)}
+              </button>
+
+              {SCRIPT_ACTIVE_STATUSES.has(scriptRun?.status) && (
+                <button
+                  type="button"
+                  className="project-workspace-analysis-button secondary"
+                  disabled={isCancellingScript}
+                  onClick={handleCancelScriptGeneration}
+                >
+                  {isCancellingScript ? "正在取消……" : "取消生成"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {scriptError && (
+            <p className="project-workspace-analysis-error">
+              {scriptError}
+            </p>
+          )}
+
+          <div className="project-workspace-script-controls">
+            <label>
+              <span>模型</span>
+              <select
+                value={scriptModel}
+                disabled={isGeneratingScript || isCancellingScript}
+                onChange={(event) => {
+                  setScriptModel(event.target.value);
+                }}
+              >
+                <option value="deepseek-v4-pro">
+                  DeepSeek V4 Pro
+                </option>
+              </select>
+            </label>
+
+            <label className="project-workspace-script-switch">
+              <input
+                type="checkbox"
+                checked={scriptThinkingEnabled}
+                disabled={isGeneratingScript || isCancellingScript}
+                onChange={(event) => {
+                  setScriptThinkingEnabled(event.target.checked);
+                }}
+              />
+              <span>深度思考</span>
+            </label>
+          </div>
+
+          {scriptRun && (
+            <div className="project-workspace-analysis-summary">
+              <div>
+                <span>状态</span>
+                <strong>{scriptRun.status}</strong>
+              </div>
+
+              <div>
+                <span>批次</span>
+                <strong>{scriptRun.id}</strong>
+              </div>
+
+              <div>
+                <span>模型</span>
+                <strong>
+                  {scriptRun.provider || "-"}
+                  {scriptRun.model ? ` / ${scriptRun.model}` : ""}
+                </strong>
+              </div>
+
+              <div>
+                <span>进度</span>
+                <strong>
+                  {scriptRun.processed_chunks ?? 0}
+                  {" / "}
+                  {scriptRun.total_chunks ?? 0}
+                </strong>
+              </div>
+
+              <div>
+                <span>场景</span>
+                <strong>{scriptRun.scene_count ?? scriptScenes.length}</strong>
+              </div>
+
+              <div>
+                <span>部分成功</span>
+                <strong>{scriptRun.partial_chunks ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>失败</span>
+                <strong>{scriptRun.failed_chunks ?? 0}</strong>
+              </div>
+            </div>
+          )}
+
+          {scriptScenes.length > 0 && (
+            <div className="project-workspace-script-grid">
+              <div className="project-workspace-script-list">
+                {scriptScenes.map((scene) => (
+                  <button
+                    type="button"
+                    key={scene.id}
+                    className={
+                      selectedScriptScene?.id === scene.id
+                        ? "project-workspace-script-list-item active"
+                        : "project-workspace-script-list-item"
+                    }
+                    onClick={() => handleSelectScriptScene(scene)}
+                  >
+                    <strong>
+                      第
+                      {scene.scene_number}
+                      场
+                    </strong>
+                    <span>{scene.heading}</span>
+                    <small>
+                      {scene.is_user_edited ? "已编辑" : "AI 生成"}
+                      {scene.warnings?.length > 0
+                        ? ` · ${scene.warnings.length} 条警告`
+                        : ""}
+                    </small>
+                  </button>
+                ))}
+              </div>
+
+              {selectedScriptScene && (
+                <article className="project-workspace-script-detail">
+                  {editingSceneId === selectedScriptScene.id ? (
+                    <>
+                      <label>
+                        <span>场景标题</span>
+                        <input
+                          value={sceneDraft.heading}
+                          onChange={(event) => {
+                            setSceneDraft((currentDraft) => ({
+                              ...currentDraft,
+                              heading: event.target.value,
+                            }));
+                          }}
+                        />
+                      </label>
+
+                      <div className="project-workspace-scene-meta-editor">
+                        <label>
+                          <span>内/外景</span>
+                          <input
+                            value={sceneDraft.interiorExterior}
+                            onChange={(event) => {
+                              setSceneDraft((currentDraft) => ({
+                                ...currentDraft,
+                                interiorExterior: event.target.value,
+                              }));
+                            }}
+                          />
+                        </label>
+
+                        <label>
+                          <span>地点</span>
+                          <input
+                            value={sceneDraft.location}
+                            onChange={(event) => {
+                              setSceneDraft((currentDraft) => ({
+                                ...currentDraft,
+                                location: event.target.value,
+                              }));
+                            }}
+                          />
+                        </label>
+
+                        <label>
+                          <span>时间</span>
+                          <input
+                            value={sceneDraft.timeOfDay}
+                            onChange={(event) => {
+                              setSceneDraft((currentDraft) => ({
+                                ...currentDraft,
+                                timeOfDay: event.target.value,
+                              }));
+                            }}
+                          />
+                        </label>
+                      </div>
+
+                      <label>
+                        <span>出场人物</span>
+                        <input
+                          value={sceneDraft.charactersText}
+                          placeholder="例如：韩立、舞岩、韩母"
+                          onChange={(event) => {
+                            setSceneDraft((currentDraft) => ({
+                              ...currentDraft,
+                              charactersText: event.target.value,
+                            }));
+                          }}
+                        />
+                      </label>
+
+                      <label>
+                        <span>剧本正文</span>
+                        <textarea
+                          value={sceneDraft.scriptText}
+                          onChange={(event) => {
+                            setSceneDraft((currentDraft) => ({
+                              ...currentDraft,
+                              scriptText: event.target.value,
+                            }));
+                          }}
+                        />
+                      </label>
+
+                      <div className="project-workspace-script-actions">
+                        <button
+                          type="button"
+                          onClick={() => handleSaveScene(selectedScriptScene)}
+                        >
+                          保存
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary"
+                          onClick={handleCancelSceneEdit}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="project-workspace-script-detail-heading">
+                        <div>
+                          <span>
+                            第
+                            {selectedScriptScene.scene_number}
+                            场
+                          </span>
+                          <h3>{selectedScriptScene.heading}</h3>
+                        </div>
+                        <div className="project-workspace-script-actions">
+                          <button
+                            type="button"
+                            className="secondary"
+                            onClick={() => handleViewScriptSceneSource(selectedScriptScene)}
+                          >
+                            查看原文
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleStartSceneEdit(selectedScriptScene)}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="secondary"
+                            disabled={regeneratingSceneId === selectedScriptScene.id}
+                            onClick={() => handleRegenerateScene(selectedScriptScene)}
+                          >
+                            {regeneratingSceneId === selectedScriptScene.id
+                              ? "生成中"
+                              : "重生成"}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="project-workspace-script-meta">
+                        <span>{selectedScriptScene.interior_exterior}</span>
+                        <span>{selectedScriptScene.location}</span>
+                        <span>{selectedScriptScene.time_of_day}</span>
+                      </div>
+
+                      {selectedScriptScene.characters?.length > 0 && (
+                        <p className="project-workspace-script-characters">
+                          人物：
+                          {selectedScriptScene.characters
+                            .map((character) => character.name)
+                            .join("、")}
+                        </p>
+                      )}
+
+                      <pre className="project-workspace-script-text">
+                        {selectedScriptScene.script_text}
+                      </pre>
+
+                      <label className="project-workspace-regenerate-box">
+                        <span>重生成要求</span>
+                        <input
+                          value={regenerateInstruction}
+                          placeholder="例如：更忠实原文，减少镜头术语"
+                          onChange={(event) => {
+                            setRegenerateInstruction(event.target.value);
+                          }}
+                        />
+                      </label>
+
+                      {selectedScriptScene.warnings?.length > 0 && (
+                        <div className="project-workspace-script-warnings">
+                          {selectedScriptScene.warnings.map((warning) => (
+                            <span key={warning}>{warning}</span>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </article>
+              )}
+            </div>
+          )}
+        </section>
       </header>
 
       <section className="project-workspace-layout">
@@ -1187,6 +2118,10 @@ function ProjectWorkspacePage() {
               })}
             </div>
           )}
+
+          <div className="project-workspace-sidebar-footer">
+            {appendFilesControl}
+          </div>
         </aside>
 
         <article className="project-workspace-reader">

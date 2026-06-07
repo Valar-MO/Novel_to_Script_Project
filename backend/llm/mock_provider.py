@@ -26,6 +26,7 @@ from backend.llm.schemas import (
     EventFrameExtractionOutput,
     MentionExtractionOutput,
     RelationExtractionOutput,
+    ScriptGenerationOutput,
 )
 
 
@@ -307,6 +308,12 @@ class MockProvider(LLMProvider):
             is CharacterCandidateExtractionOutput
         ):
             return CharacterCandidateExtractionOutput()
+
+        if (
+            response_model
+            is ScriptGenerationOutput
+        ):
+            return ScriptGenerationOutput()
 
         raise MockResponseNotConfiguredError(
             "没有为响应模型 "

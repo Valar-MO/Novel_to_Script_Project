@@ -7,15 +7,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.api.narrative_analysis import router as narrative_analysis_router
 from backend.api.project_characters import router as project_characters_router
 from backend.api.projects import router as projects_router
+from backend.api.script_generation import router as script_generation_router
 from backend.services.analysis_job_runner import analysis_job_runner
+from backend.services.script_generation_runner import script_generation_runner
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await analysis_job_runner.start()
+    await script_generation_runner.start()
     try:
         yield
     finally:
+        await script_generation_runner.stop()
         await analysis_job_runner.stop()
 
 
@@ -37,13 +41,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["*"],
 )
 
 app.include_router(projects_router)
 app.include_router(narrative_analysis_router)
 app.include_router(project_characters_router)
+app.include_router(script_generation_router)
 
 
 @app.get("/api/health", tags=["system"])
