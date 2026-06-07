@@ -187,22 +187,6 @@ def _create_script_generation_provider(
             cloud_api_reasoning_effort=None,
             cloud_api_thinking_enabled=thinking_enabled,
         )
-    elif settings.provider == "ollama" and settings.cloud_api_key:
-        settings = replace(
-            settings,
-            provider="deepseek",
-            cloud_api_base_url=(
-                settings.cloud_api_base_url
-                or "https://api.deepseek.com"
-            ),
-            cloud_api_model=(
-                settings.cloud_api_model
-                or "deepseek-v4-pro"
-            ),
-            cloud_api_reasoning_effort=None,
-            cloud_api_thinking_enabled=thinking_enabled,
-        )
-
     return create_llm_provider(settings=settings)
 
 

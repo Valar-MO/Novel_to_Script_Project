@@ -19,8 +19,6 @@ import {
 import {
   getActiveNarrativeAnalysisRun,
   getNarrativeAnalysisRun,
-  resumeNarrativeAnalysis,
-  retryFailedNarrativeAnalysis,
   startNarrativeAnalysis,
 } from "../api/narrativeAnalysis";
 import {
@@ -32,21 +30,72 @@ import {
   startScriptGeneration,
   updateScriptScene,
 } from "../api/scriptGeneration";
+import {
+  buildProjectRelationships,
+  createProjectRelationship,
+  deleteProjectRelationship,
+  getProjectRelationships,
+  updateProjectRelationship,
+} from "../api/projectRelationships";
+
+import {
+  buildProjectCharacters,
+  deleteProjectCharacter,
+  getLatestProjectCharacters,
+  updateProjectCharacterPin,
+} from "../api/projectCharacters";
 
 import "./ProjectWorkspacePage.css";
 
-
-const ANALYSIS_TERMINAL_STATUSES = new Set([
-  "completed",
-  "partial",
-  "failed",
-  "interrupted",
-]);
 
 const ANALYSIS_ACTIVE_STATUSES = new Set([
   "queued",
   "running",
 ]);
+
+
+function wait(milliseconds) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, milliseconds);
+  });
+}
+
+
+async function waitForNarrativeAnalysisCompletion(
+  runId,
+  onProgress,
+) {
+  while (true) {
+    const run = await getNarrativeAnalysisRun(
+      runId,
+      {
+        includeUnits: false,
+      },
+    );
+
+    onProgress(run);
+
+    if (
+      run.status === "completed"
+      || run.status === "partial"
+    ) {
+      return run;
+    }
+
+    if (
+      run.status === "failed"
+      || run.status === "interrupted"
+    ) {
+      throw new Error(
+        run.error_message
+        || "AI 叙事分析未能完成。",
+      );
+    }
+
+    await wait(2000);
+  }
+}
+
 
 const SCRIPT_TERMINAL_STATUSES = new Set([
   "completed",
@@ -60,6 +109,8 @@ const SCRIPT_ACTIVE_STATUSES = new Set([
   "queued",
   "running",
 ]);
+
+const DEFAULT_VISIBLE_RELATIONSHIP_COUNT = 6;
 
 
 function formatBytes(sizeBytes) {
@@ -154,37 +205,6 @@ function getErrorMessage(error, fallbackMessage) {
 }
 
 
-function getMentionTypeLabel(mentionType) {
-  const labels = {
-    character: "人物",
-    location: "地点",
-    time: "时间",
-    organization: "组织",
-    object: "物件",
-  };
-
-  return labels[mentionType] || mentionType;
-}
-
-
-function getEventTypeLabel(eventType) {
-  const labels = {
-    movement: "移动",
-    communication: "交流",
-    perception: "感知",
-    cognition: "认知",
-    state: "状态",
-    possession: "持有",
-    social: "社会行为",
-    creation: "创建",
-    conflict: "冲突",
-    other: "其他",
-  };
-
-  return labels[eventType] || eventType;
-}
-
-
 function buildEditedCharacters(text, originalCharacters = []) {
   const originalByName = new Map(
     originalCharacters.map((character) => [
@@ -267,14 +287,8 @@ function ProjectWorkspacePage() {
   const [chapterError, setChapterError] = useState("");
   const [chapterReloadKey, setChapterReloadKey] = useState(0);
 
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState(null);
-  const [analysisError, setAnalysisError] = useState("");
   const [activeMention, setActiveMention] = useState(null);
-  const [
-    showMentionDebug,
-    setShowMentionDebug,
-  ] = useState(false);
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
   const [isCancellingScript, setIsCancellingScript] = useState(false);
   const [scriptState, setScriptState] = useState(null);
@@ -297,6 +311,23 @@ function ProjectWorkspacePage() {
   const [regenerateInstruction, setRegenerateInstruction] = useState("");
   const [scriptModel, setScriptModel] = useState("deepseek-v4-pro");
   const [scriptThinkingEnabled, setScriptThinkingEnabled] = useState(false);
+  const [relationshipData, setRelationshipData] = useState(null);
+  const [characterRun, setCharacterRun] = useState(null);
+  const [relationshipError, setRelationshipError] = useState("");
+  const [isBuildingRelationships, setIsBuildingRelationships] = useState(false);
+  const [showAllRelationships, setShowAllRelationships] = useState(false);
+  const [showCharacterManager, setShowCharacterManager] = useState(false);
+  const [relationshipBuildStage, setRelationshipBuildStage] = useState("");
+  const [editingRelationshipId, setEditingRelationshipId] = useState(null);
+  const [relationshipDraft, setRelationshipDraft] = useState({
+    sourceCharacterId: "",
+    sourceCharacterName: "",
+    targetCharacterId: "",
+    targetCharacterName: "",
+    relationLabel: "",
+    relationDescription: "",
+    evidenceText: "",
+  });
 
   const selectedChapterSummary = useMemo(() => {
     for (const file of project?.files || []) {
@@ -311,6 +342,29 @@ function ProjectWorkspacePage() {
 
     return null;
   }, [project, selectedChapterId]);
+
+  const importantRelationships = (
+    relationshipData?.core_relationships || []
+  );
+
+  const visibleRelationships = (
+    showAllRelationships
+      ? importantRelationships
+      : importantRelationships.slice(
+          0,
+          DEFAULT_VISIBLE_RELATIONSHIP_COUNT,
+        )
+  );
+
+  const hiddenRelationshipCount = Math.max(
+    0,
+    importantRelationships.length
+      - DEFAULT_VISIBLE_RELATIONSHIP_COUNT,
+  );
+
+  const importantRelationshipCount = (
+    relationshipData?.core_relationships?.length || 0
+  );
 
   async function refreshProjectSummary() {
     const projectData = await getProjectSummary(projectId);
@@ -344,6 +398,25 @@ function ProjectWorkspacePage() {
     }
 
     return state;
+  }
+
+  async function refreshRelationships({ signal } = {}) {
+    const data = await getProjectRelationships(projectId, { signal });
+    setRelationshipData(data);
+    return data;
+  }
+
+  function resetRelationshipDraft() {
+    setEditingRelationshipId(null);
+    setRelationshipDraft({
+      sourceCharacterId: "",
+      sourceCharacterName: "",
+      targetCharacterId: "",
+      targetCharacterName: "",
+      relationLabel: "",
+      relationDescription: "",
+      evidenceText: "",
+    });
   }
 
   useEffect(() => {
@@ -494,13 +567,26 @@ function ProjectWorkspacePage() {
 
     const controller = new AbortController();
 
-    getActiveNarrativeAnalysisRun(projectId, {
-      signal: controller.signal,
-    })
-      .then((activeRun) => {
-        if (activeRun) {
-          setAnalysisResult(activeRun);
-        }
+    Promise.all([
+      getProjectRelationships(
+        projectId,
+        {
+          signal: controller.signal,
+        },
+      ),
+      getLatestProjectCharacters(
+        projectId,
+        {
+          signal: controller.signal,
+        },
+      ),
+    ])
+      .then(([
+        relationships,
+        latestCharacterRun,
+      ]) => {
+        setRelationshipData(relationships);
+        setCharacterRun(latestCharacterRun);
       })
       .catch((error) => {
         if (
@@ -510,10 +596,10 @@ function ProjectWorkspacePage() {
           return;
         }
 
-        setAnalysisError(
+        setRelationshipError(
           getErrorMessage(
             error,
-            "读取当前 AI 分析任务失败。",
+            "读取人物关系失败。",
           ),
         );
       });
@@ -592,79 +678,6 @@ function ProjectWorkspacePage() {
     projectId,
     projectLoading,
     projectError,
-  ]);
-
-  useEffect(() => {
-    const runId = analysisResult?.id || analysisResult?.run_id;
-
-    if (!runId || !ANALYSIS_ACTIVE_STATUSES.has(analysisResult.status)) {
-      return undefined;
-    }
-
-    let timeoutId = null;
-    const controller = new AbortController();
-
-    async function pollRun() {
-      try {
-        const runDetail = await getNarrativeAnalysisRun(
-          runId,
-          {
-            includeUnits: false,
-            signal: controller.signal,
-          },
-        );
-
-        if (ANALYSIS_TERMINAL_STATUSES.has(runDetail.status)) {
-          const runWithUnits = await getNarrativeAnalysisRun(
-            runId,
-            {
-              includeUnits: true,
-              signal: controller.signal,
-            },
-          );
-          setAnalysisResult(runWithUnits);
-          setIsAnalyzing(false);
-          return;
-        }
-
-        setAnalysisResult((current) => ({
-          ...(current || {}),
-          ...runDetail,
-          units: current?.units || [],
-        }));
-        setIsAnalyzing(true);
-        timeoutId = window.setTimeout(pollRun, 2500);
-      } catch (error) {
-        if (
-          error instanceof DOMException
-          && error.name === "AbortError"
-        ) {
-          return;
-        }
-
-        setIsAnalyzing(false);
-        setAnalysisError(
-          getErrorMessage(
-            error,
-            "刷新 AI 分析进度失败。",
-          ),
-        );
-      }
-    }
-
-    timeoutId = window.setTimeout(pollRun, 800);
-
-    return () => {
-      controller.abort();
-
-      if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
-      }
-    };
-  }, [
-    analysisResult?.id,
-    analysisResult?.run_id,
-    analysisResult?.status,
   ]);
 
   useEffect(() => {
@@ -839,99 +852,316 @@ function ProjectWorkspacePage() {
     );
   }
 
-  async function handleStartAnalysis() {
-    setIsAnalyzing(true);
-    setAnalysisError("");
-    setActiveMention(null);
-    setShowMentionDebug(false);
+  async function handleBuildRelationships() {
+    if (isBuildingRelationships) {
+      return;
+    }
+
+    setIsBuildingRelationships(true);
+    setRelationshipError("");
+    setRelationshipBuildStage("正在检查分析任务");
+    setAnalysisResult(null);
 
     try {
-      const result = await startNarrativeAnalysis(
+      let activeRun = await getActiveNarrativeAnalysisRun(
         projectId,
-        {
-          maxChunks: null,
-          forceReanalyze: false,
-        },
       );
 
-      setAnalysisResult({
-        id: result.run_id,
-        ...result,
-        units: [],
-      });
-    } catch (error) {
-      setAnalysisError(
-        error instanceof Error
-          ? error.message
-          : "AI analysis failed.",
+      let runId;
+
+      if (
+        activeRun
+        && ANALYSIS_ACTIVE_STATUSES.has(activeRun.status)
+      ) {
+        runId = activeRun.id || activeRun.run_id;
+        setAnalysisResult(activeRun);
+      } else {
+        setRelationshipBuildStage("正在启动文本分析");
+
+        const startedRun = await startNarrativeAnalysis(
+          projectId,
+          {
+            maxChunks: null,
+            forceReanalyze: false,
+          },
+        );
+
+        runId = startedRun.run_id;
+
+        setAnalysisResult({
+          id: runId,
+          ...startedRun,
+        });
+      }
+
+      setRelationshipBuildStage("正在分析小说文本");
+
+      const completedAnalysis = (
+        await waitForNarrativeAnalysisCompletion(
+          runId,
+          (runDetail) => {
+            setAnalysisResult(runDetail);
+          },
+        )
       );
+
+      setRelationshipBuildStage("正在整理项目人物");
+
+      const builtCharacterRun = await buildProjectCharacters(
+        projectId,
+        completedAnalysis.id,
+      );
+
+      if (!builtCharacterRun?.characters?.length) {
+        throw new Error(
+          "没有识别到可用人物，暂时无法生成人物关系。",
+        );
+      }
+
+      setCharacterRun(builtCharacterRun);
+
+      setRelationshipBuildStage("正在筛选重要关系");
+
+      const relationships = await buildProjectRelationships(
+        projectId,
+        builtCharacterRun.id,
+      );
+
+      setRelationshipData(relationships);
+      setShowAllRelationships(false);
+      resetRelationshipDraft();
+    } catch (error) {
+      setRelationshipError(
+        getErrorMessage(
+          error,
+          "分析人物关系失败。",
+        ),
+      );
+    } finally {
+      setIsBuildingRelationships(false);
+      setRelationshipBuildStage("");
     }
   }
 
-  async function handleResumeAnalysis() {
-    const runId = analysisResult?.id || analysisResult?.run_id;
+  async function handleToggleCharacterPin(character) {
+    setRelationshipError("");
+    setIsBuildingRelationships(true);
+    setRelationshipBuildStage("正在更新核心人物");
 
-    if (!runId) {
+    try {
+      const updatedCharacterRun = (
+        await updateProjectCharacterPin(
+          character.id,
+          !character.is_user_pinned,
+        )
+      );
+
+      setCharacterRun(updatedCharacterRun);
+
+      setRelationshipBuildStage("正在重新筛选重要关系");
+
+      const relationships = await buildProjectRelationships(
+        projectId,
+        updatedCharacterRun.id,
+      );
+
+      setRelationshipData(relationships);
+    } catch (error) {
+      setRelationshipError(
+        getErrorMessage(
+          error,
+          "更新核心人物失败。",
+        ),
+      );
+    } finally {
+      setIsBuildingRelationships(false);
+      setRelationshipBuildStage("");
+    }
+  }
+
+  async function handleDeleteOrdinaryCharacter(
+    character,
+  ) {
+    const confirmed = window.confirm(
+      `确定删除普通人物“${character.canonical_name}”吗？`
+      + "\n删除后，该人物以及与其相关的关系将不再展示。",
+    );
+
+    if (!confirmed) {
       return;
     }
 
-    setIsAnalyzing(true);
-    setAnalysisError("");
+    setRelationshipError("");
+    setIsBuildingRelationships(true);
+    setRelationshipBuildStage("正在删除普通人物");
 
     try {
-      const result = await resumeNarrativeAnalysis(runId);
+      const updatedCharacterRun = (
+        await deleteProjectCharacter(character.id)
+      );
 
-      setAnalysisResult({
-        id: result.run_id,
-        ...result,
-        units: analysisResult?.units || [],
-      });
+      setCharacterRun(updatedCharacterRun);
+
+      const relationships = await getProjectRelationships(
+        projectId,
+      );
+
+      setRelationshipData(relationships);
     } catch (error) {
-      setIsAnalyzing(false);
-      setAnalysisError(
+      setRelationshipError(
         getErrorMessage(
           error,
-          "继续 AI 分析失败。",
+          "删除普通人物失败。",
+        ),
+      );
+    } finally {
+      setIsBuildingRelationships(false);
+      setRelationshipBuildStage("");
+    }
+  }
+
+  async function handleToggleCharacterManager() {
+    if (showCharacterManager) {
+      setShowCharacterManager(false);
+      return;
+    }
+
+    setRelationshipError("");
+
+    try {
+      if (!characterRun) {
+        const latestCharacterRun = (
+          await getLatestProjectCharacters(projectId)
+        );
+
+        setCharacterRun(latestCharacterRun);
+      }
+
+      setShowCharacterManager(true);
+    } catch (error) {
+      setRelationshipError(
+        getErrorMessage(
+          error,
+          "读取项目人物失败。",
         ),
       );
     }
   }
 
-  async function handleRetryFailedAnalysis() {
-    const runId = analysisResult?.id || analysisResult?.run_id;
+  function handleStartRelationshipEdit(relationship) {
+    setEditingRelationshipId(relationship.id);
+    setRelationshipDraft({
+      sourceCharacterId: relationship.source_character_id,
+      sourceCharacterName: relationship.source_character_name,
+      targetCharacterId: relationship.target_character_id,
+      targetCharacterName: relationship.target_character_name,
+      relationLabel: relationship.relation_label,
+      relationDescription: relationship.relation_description || "",
+      evidenceText: relationship.evidence_text || "",
+    });
+  }
 
-    if (!runId) {
-      return;
-    }
+  function handleStartRelationshipCreate() {
+    const [firstCharacter, secondCharacter] = (
+      relationshipData?.core_characters || []
+    );
+    setEditingRelationshipId("new");
+    setRelationshipDraft({
+      sourceCharacterId: firstCharacter?.character_id || "",
+      sourceCharacterName: firstCharacter?.canonical_name || "",
+      targetCharacterId: secondCharacter?.character_id || "",
+      targetCharacterName: secondCharacter?.canonical_name || "",
+      relationLabel: "",
+      relationDescription: "",
+      evidenceText: "",
+    });
+  }
 
-    setIsAnalyzing(true);
-    setAnalysisError("");
+  function updateRelationshipDraftField(fieldName, value) {
+    setRelationshipDraft((currentDraft) => ({
+      ...currentDraft,
+      [fieldName]: value,
+    }));
+  }
+
+  function updateRelationshipDraftCharacter(fieldName, characterId) {
+    const character = (relationshipData?.core_characters || [])
+      .find((item) => item.character_id === characterId);
+
+    setRelationshipDraft((currentDraft) => ({
+      ...currentDraft,
+      [fieldName]: characterId,
+      [fieldName === "sourceCharacterId"
+        ? "sourceCharacterName"
+        : "targetCharacterName"]: character?.canonical_name || "",
+    }));
+  }
+
+  async function handleSaveRelationship() {
+    setRelationshipError("");
 
     try {
-      const result = await retryFailedNarrativeAnalysis(runId);
+      if (editingRelationshipId === "new") {
+        await createProjectRelationship(
+          projectId,
+          {
+            source_character_id: relationshipDraft.sourceCharacterId,
+            source_character_name: relationshipDraft.sourceCharacterName,
+            target_character_id: relationshipDraft.targetCharacterId,
+            target_character_name: relationshipDraft.targetCharacterName,
+            relation_label: relationshipDraft.relationLabel,
+            relation_description: relationshipDraft.relationDescription,
+            evidence_text: relationshipDraft.evidenceText,
+          },
+        );
+      } else {
+        await updateProjectRelationship(
+          editingRelationshipId,
+          {
+            relation_label: relationshipDraft.relationLabel,
+            relation_description: relationshipDraft.relationDescription,
+            evidence_text: relationshipDraft.evidenceText,
+          },
+        );
+      }
 
-      setAnalysisResult({
-        id: result.run_id,
-        ...result,
-        units: analysisResult?.units || [],
-      });
+      await refreshRelationships();
+      resetRelationshipDraft();
     } catch (error) {
-      setIsAnalyzing(false);
-      setAnalysisError(
+      setRelationshipError(
         getErrorMessage(
           error,
-          "重试失败文本块失败。",
+          "保存人物关系失败。",
         ),
       );
     }
   }
 
-  async function refreshScriptScenes(runId) {
-    const scenesData = await getScriptGenerationScenes(runId);
-    setScriptScenes(scenesData.scenes || []);
-    setSelectedScriptSceneId((currentId) => (
-      currentId || scenesData.scenes?.[0]?.id || null
-    ));
+  async function handleDeleteRelationship(relationship) {
+    const confirmed = window.confirm(
+      `确定删除关系「${relationship.relation_label}」吗？`,
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setRelationshipError("");
+
+    try {
+      await deleteProjectRelationship(relationship.id);
+      await refreshRelationships();
+      if (editingRelationshipId === relationship.id) {
+        resetRelationshipDraft();
+      }
+    } catch (error) {
+      setRelationshipError(
+        getErrorMessage(
+          error,
+          "删除人物关系失败。",
+        ),
+      );
+    }
   }
 
   async function handleStartScriptGeneration() {
@@ -1218,8 +1448,24 @@ function ProjectWorkspacePage() {
       ? getChapterDisplayName(selectedChapterSummary)
       : "尚未选择章节";
 
-  function handleMentionClick(mention) {
+  async function handleMentionClick(mention) {
     setActiveMention(mention);
+
+    const sourceChunkId = mention.source_chunk_id || mention.chunk_id;
+    if (!sourceChunkId) {
+      return;
+    }
+
+    try {
+      const chunk = await getProjectChunk(projectId, sourceChunkId);
+
+      if (chunk?.chapter_id && chunk.chapter_id !== selectedChapterId) {
+        setSelectedChapterId(chunk.chapter_id);
+        setChapterReloadKey(0);
+      }
+    } catch {
+      // Highlight still works if the current chapter already contains evidence.
+    }
   }
 
   const appendFilesControl = (
@@ -1340,354 +1586,466 @@ function ProjectWorkspacePage() {
           </div>
         </div>
 
-        <section className="project-workspace-analysis">
+        <section className="project-workspace-relationships">
           <div className="project-workspace-analysis-heading">
             <div>
-              <strong>AI 叙事分析</strong>
-              <span>按当前项目的全部文本块串行分析</span>
+              <strong>人物关系</strong>
+              <span>生成可编辑的核心人物关系，供后续剧本生成参考</span>
             </div>
 
-            <button
-              type="button"
-              className="project-workspace-analysis-button"
-              disabled={isAnalyzing}
-              onClick={handleStartAnalysis}
-            >
-              {isAnalyzing
-                ? "Analysis running..."
-                : "开始 AI 分析"}
-            </button>
-
-            {analysisResult?.status === "interrupted" && (
+            <div className="project-workspace-script-primary-actions">
               <button
                 type="button"
                 className="project-workspace-analysis-button"
-                disabled={isAnalyzing}
-                onClick={handleResumeAnalysis}
+                disabled={isBuildingRelationships}
+                onClick={handleBuildRelationships}
               >
-                继续分析
+                {isBuildingRelationships
+                  ? "正在分析…"
+                  : relationshipData?.relationships?.length
+                    ? "重新分析人物关系"
+                    : "分析人物关系"}
               </button>
-            )}
 
-            {(analysisResult?.failed_chunks ?? 0) > 0 && (
               <button
                 type="button"
-                className="project-workspace-analysis-button"
-                disabled={isAnalyzing}
-                onClick={handleRetryFailedAnalysis}
+                className="project-workspace-analysis-button secondary"
+                disabled={
+                  isBuildingRelationships
+                  || !relationshipData?.core_characters?.length
+                }
+                onClick={handleStartRelationshipCreate}
               >
-                重试失败文本块
+                新增关系
               </button>
-            )}
+
+              <button
+                type="button"
+                className="project-workspace-analysis-button secondary"
+                disabled={
+                  isBuildingRelationships
+                  || !characterRun?.characters?.length
+                }
+                onClick={handleToggleCharacterManager}
+              >
+                {showCharacterManager
+                  ? "收起人物管理"
+                  : "管理核心人物"}
+              </button>
+            </div>
           </div>
 
-          {analysisError && (
+          {relationshipError && (
             <p className="project-workspace-analysis-error">
-              {analysisError}
+              {relationshipError}
             </p>
           )}
 
-          {analysisResult && (
-            <div className="project-workspace-analysis-summary">
-              <div>
-                <span>状态</span>
-                <strong>{analysisResult.status}</strong>
-              </div>
+          {isBuildingRelationships && (
+            <div className="project-workspace-relationship-progress">
+              <strong>
+                {relationshipBuildStage || "正在处理人物关系"}
+              </strong>
 
-              <div>
-                <span>批次</span>
-                <strong>{analysisResult.id}</strong>
-              </div>
-              <div>
-                <span>进度</span>
-                <strong>
+              {analysisResult?.total_chunks > 0 && (
+                <span>
                   {analysisResult.processed_chunks ?? 0}
                   {" / "}
-                  {analysisResult.total_chunks ?? 0}
-                </strong>
-              </div>
-
-              <div>
-                <span>成功</span>
-                <strong>{analysisResult.successful_chunks ?? 0}</strong>
-              </div>
-
-              <div>
-                <span>部分成功</span>
-                <strong>{analysisResult.partial_chunks ?? 0}</strong>
-              </div>
-
-              <div>
-                <span>失败</span>
-                <strong>{analysisResult.failed_chunks ?? 0}</strong>
-              </div>
-
-              <div>
-                <span>缓存层</span>
-                <strong>{analysisResult.cached_layers ?? 0}</strong>
-              </div>
-
-              <div>
-                <span>缓存块</span>
-                <strong>{analysisResult.cached_chunks ?? 0}</strong>
-              </div>
-
-              <div>
-                <span>当前文本块</span>
-                <strong>{analysisResult.current_chunk_id || "-"}</strong>
-              </div>
+                  {analysisResult.total_chunks}
+                  {" 个文本块"}
+                </span>
+              )}
             </div>
           )}
 
-          {analysisResult?.units?.length > 0 && (
-            <div className="project-workspace-mentions">
-              {analysisResult.units.map((unit) => {
-                const mentions = (
-                  unit.validated_result?.mentions
-                  || unit.result?.mentions
-                  || []
-                );
-                const relations = (
-                  unit.validated_result?.relations
-                  || unit.result?.relations
-                  || []
-                );
-                const eventFrames = (
-                  unit.validated_result?.event_frames
-                  || unit.result?.event_frames
-                  || []
-                );
-                const characterCandidates = (
-                  unit.validated_result?.character_candidates
-                  || unit.result?.character_candidates
-                  || []
-                );
+          <div className="project-workspace-relationship-summary">
+            <div>
+              <span>核心人物</span>
+              <strong>
+                {relationshipData?.core_characters?.length || 0}
+              </strong>
+            </div>
 
-                return (
-                  <section
-                    key={unit.id}
-                    className="project-workspace-mention-unit"
+            <div>
+              <span>重要关系</span>
+              <strong>
+                {relationshipData?.core_relationships?.length || 0}
+              </strong>
+            </div>
+          </div>
+
+          {relationshipData?.core_characters?.length > 0 && (
+            <div className="project-workspace-core-characters">
+              {relationshipData.core_characters.map((character) => (
+                <div
+                  key={character.character_id}
+                  className={
+                    character.is_user_pinned
+                      ? "project-workspace-core-character pinned"
+                      : "project-workspace-core-character"
+                  }
+                  title={
+                    character.is_user_pinned
+                      ? "用户固定的核心人物"
+                      : "系统筛选的核心人物"
+                  }
+                >
+                  <strong>{character.canonical_name}</strong>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {showCharacterManager && (
+            <section className="project-workspace-character-manager">
+              <div className="project-workspace-character-manager-heading">
+                <div>
+                  <strong>管理核心人物</strong>
+                  <span>
+                    固定的人物会始终作为核心人物参与关系筛选
+                  </span>
+                </div>
+              </div>
+
+              {(characterRun?.characters || []).length > 0 ? (
+                <div className="project-workspace-character-manager-list">
+                  {characterRun.characters.map((character) => {
+                    const isCore = (
+                      relationshipData?.core_characters || []
+                    ).some(
+                      (coreCharacter) => (
+                        coreCharacter.character_id
+                        === character.character_id
+                      ),
+                    );
+
+                    const inputQuality = character.input_quality || {};
+
+                    const chunkCount = Number(
+                      inputQuality.chunk_count || 0,
+                    );
+
+                    const mentionCount = Number(
+                      inputQuality.mention_count
+                      || character.evidence_count
+                      || 0,
+                    );
+
+                    let statusLabel = "普通人物";
+
+                    if (character.is_user_pinned) {
+                      statusLabel = "已固定为核心";
+                    } else if (isCore) {
+                      statusLabel = "自动核心";
+                    }
+
+                    const canDelete = (
+                      !character.is_user_pinned
+                      && !isCore
+                    );
+
+                    return (
+                      <div
+                        key={character.id}
+                        className="project-workspace-character-manager-item"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={Boolean(character.is_user_pinned)}
+                          disabled={isBuildingRelationships}
+                          onChange={() => {
+                            handleToggleCharacterPin(character);
+                          }}
+                        />
+
+                        <span className="project-workspace-character-manager-name">
+                          <strong>{character.canonical_name}</strong>
+
+                          <small>
+                            出现于 {chunkCount} 个文本块，共
+                            {" "}
+                            {mentionCount}
+                            {" "}
+                            次提及
+                          </small>
+                        </span>
+
+                        <span className="project-workspace-character-manager-status">
+                          {statusLabel}
+                        </span>
+
+                        {canDelete && (
+                          <button
+                            type="button"
+                            className="project-workspace-character-delete-button"
+                            disabled={isBuildingRelationships}
+                            onClick={() => {
+                              handleDeleteOrdinaryCharacter(character);
+                            }}
+                          >
+                            删除
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="project-workspace-mention-empty">
+                  尚未生成人物表。
+                </p>
+              )}
+            </section>
+          )}
+
+          {importantRelationships.length > 0 ? (
+            <>
+              <div className="project-workspace-relationship-list-heading">
+                <strong>重要关系</strong>
+
+                <span>
+                  当前显示 {visibleRelationships.length}
+                  {" / "}
+                  {importantRelationships.length}
+                </span>
+              </div>
+
+              <div className="project-workspace-relationship-list">
+                {visibleRelationships.map((relationship) => (
+                  <article
+                    key={relationship.id}
+                    className="project-workspace-relationship-card"
                   >
-                    <div className="project-workspace-mention-unit-heading">
-                      <strong>{unit.chunk_id}</strong>
-                      <span>{unit.status}</span>
+                    <div>
+                      <strong>
+                        {relationship.source_character_name}
+                        {" — "}
+                        {relationship.relation_label}
+                        {" — "}
+                        {relationship.target_character_name}
+                      </strong>
+                      <span>
+                        {relationship.source_type === "user"
+                          ? "人工确认"
+                          : `AI 提取 · ${relationship.evidence_count} 条证据`}
+                      </span>
                     </div>
 
-                    {unit.error_message && (
-                      <p className="project-workspace-analysis-error">
-                        {unit.error_message}
-                      </p>
+                    {relationship.relation_description && (
+                      <p>{relationship.relation_description}</p>
                     )}
 
-                    {unit.validated_result?.layer_statuses && (
-                      <div className="project-workspace-layer-statuses">
-                        {Object.entries(
-                          unit.validated_result.layer_statuses,
-                        ).map(([layerName, layerStatus]) => (
-                          <span key={layerName}>
-                            {layerName}
-                            {": "}
-                            {layerStatus}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                    <div className="project-workspace-relationship-actions">
+                      {relationship.evidence_text && (
+                        <button
+                          type="button"
+                          onClick={() => handleMentionClick(relationship)}
+                        >
+                          查看原文
+                        </button>
+                      )}
 
-                    {characterCandidates.length > 0 && (
-                      <>
-                        <h4 className="project-workspace-result-title">
-                          人物候选
-                        </h4>
-                        <div className="project-workspace-result-list">
-                          {characterCandidates.map((candidate, index) => (
-                            <button
-                              type="button"
-                              key={
-                                candidate.character_candidate_id
-                                || `${candidate.canonical_name}-${index}`
-                              }
-                              className={
-                                activeMention === candidate
-                                  ? "project-workspace-result-item active"
-                                  : "project-workspace-result-item"
-                              }
-                              onClick={() => {
-                                handleMentionClick(candidate);
-                              }}
-                            >
-                              <strong>{candidate.canonical_name}</strong>
-                              <span>
-                                {
-                                  (
-                                    (candidate.aliases || []).length > 0
-                                      ? candidate.aliases
-                                      : candidate.references || []
-                                  ).join(" / ")
-                                }
-                              </span>
-                              {(candidate.references || []).length > 0 && (
-                                <small>
-                                  references:
-                                  {" "}
-                                  {(candidate.references || []).join(" / ")}
-                                </small>
-                              )}
-                              <small>
-                                置信度
-                                {" "}
-                                {Number(
-                                  candidate.confidence,
-                                ).toFixed(2)}
-                              </small>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-
-                    {relations.length > 0 && (
-                      <>
-                        <h4 className="project-workspace-result-title">
-                          关系
-                        </h4>
-                        <div className="project-workspace-result-list">
-                          {relations.map((relation, index) => (
-                            <button
-                              type="button"
-                              key={
-                                relation.relation_id
-                                || `${relation.source_mention}-${relation.target_mention}-${index}`
-                              }
-                              className={
-                                activeMention === relation
-                                  ? "project-workspace-result-item active"
-                                  : "project-workspace-result-item"
-                              }
-                              onClick={() => {
-                                handleMentionClick(relation);
-                              }}
-                            >
-                              <strong>
-                                {relation.source_mention}
-                                {" → "}
-                                {relation.target_mention}
-                              </strong>
-                              <span>{relation.relation}</span>
-                              <small>
-                                置信度
-                                {" "}
-                                {Number(
-                                  relation.confidence,
-                                ).toFixed(2)}
-                              </small>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-
-                    {eventFrames.length > 0 && (
-                      <>
-                        <h4 className="project-workspace-result-title">
-                          事件
-                        </h4>
-                        <div className="project-workspace-result-list">
-                          {eventFrames.map((eventFrame, index) => (
-                            <button
-                              type="button"
-                              key={
-                                eventFrame.event_frame_id
-                                || `${eventFrame.trigger_text}-${index}`
-                              }
-                              className={
-                                activeMention === eventFrame
-                                  ? "project-workspace-result-item active"
-                                  : "project-workspace-result-item"
-                              }
-                              onClick={() => {
-                                handleMentionClick(eventFrame);
-                              }}
-                            >
-                              <strong>{eventFrame.trigger_text}</strong>
-                              <span>
-                                {getEventTypeLabel(
-                                  eventFrame.event_type,
-                                )}
-                              </span>
-                              <small>
-                                {(eventFrame.arguments || [])
-                                  .map((argument) => (
-                                    `${argument.role}: ${argument.mention_text}`
-                                  ))
-                                  .join(" · ")}
-                              </small>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    )}
-
-                    <div className="project-workspace-debug-heading">
-                      <h4 className="project-workspace-result-title">
-                        文本锚点
-                      </h4>
                       <button
                         type="button"
-                        onClick={() => {
-                          setShowMentionDebug(
-                            (currentValue) => !currentValue,
-                          );
-                        }}
+                        onClick={() => handleStartRelationshipEdit(relationship)}
                       >
-                        {showMentionDebug ? "隐藏" : "展开"}
+                        编辑
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteRelationship(relationship)}
+                      >
+                        删除
                       </button>
                     </div>
+                  </article>
+                ))}
+              </div>
 
-                    {showMentionDebug && (
-                      mentions.length === 0 ? (
-                        <p className="project-workspace-mention-empty">
-                          未识别到文本锚点
-                        </p>
-                      ) : (
-                        <div className="project-workspace-mention-list">
-                          {mentions.map((mention, index) => (
-                            <button
-                              type="button"
-                              key={`${mention.mention_text}-${index}`}
-                              className={
-                                activeMention === mention
-                                  ? "project-workspace-mention-item active"
-                                  : "project-workspace-mention-item"
-                              }
-                              onClick={() => {
-                                handleMentionClick(mention);
-                              }}
-                            >
-                              <span>
-                                {getMentionTypeLabel(
-                                  mention.mention_type,
-                                )}
-                              </span>
-                              <strong>{mention.mention_text}</strong>
-                              <small>
-                                {mention.evidence_validated === false
-                                  ? "Evidence not located"
-                                  : "Evidence located"}
-                                {" · "}
-                                置信度
-                                {" "}
-                                {Number(
-                                  mention.confidence,
-                                ).toFixed(2)}
-                              </small>
-                            </button>
-                          ))}
-                        </div>
-                      )
-                    )}
-                  </section>
-                );
-              })}
+              {importantRelationships.length
+                > DEFAULT_VISIBLE_RELATIONSHIP_COUNT && (
+                <div className="project-workspace-relationship-expand">
+                  <button
+                    type="button"
+                    className="project-workspace-relationship-expand-button"
+                    onClick={() => {
+                      setShowAllRelationships(
+                        (currentValue) => !currentValue,
+                      );
+                    }}
+                  >
+                    {showAllRelationships
+                      ? "收起重要关系"
+                      : `展开其余 ${hiddenRelationshipCount} 条关系`}
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="project-workspace-mention-empty">
+              暂无重要人物关系。
+            </p>
+          )}
+
+          <div
+            className={
+              importantRelationshipCount > 0
+                ? "project-workspace-relationship-impact"
+                : "project-workspace-relationship-impact empty"
+            }
+          >
+            <div className="project-workspace-relationship-impact-icon">
+              ↓
+            </div>
+
+            <div className="project-workspace-relationship-impact-content">
+              {importantRelationshipCount > 0 ? (
+                <>
+                  <strong>
+                    已有 {importantRelationshipCount} 条人物关系可用于剧本生成
+                  </strong>
+
+                  <p>
+                    系统会参考人物身份、称呼、对白语气和互动方式，
+                    以保持不同场景中的人物关系一致。
+                  </p>
+
+                  <span>
+                    修改后需要重新生成场景，新的关系才会反映在剧本中。
+                  </span>
+                </>
+              ) : (
+                <>
+                  <strong>尚未建立可用的人物关系</strong>
+
+                  <p>
+                    剧本仍可以根据小说原文生成，但人物称呼和互动方式
+                    将主要由模型根据当前文本判断。
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+
+          {editingRelationshipId && (
+            <div className="project-workspace-relationship-editor">
+              <h4>
+                {editingRelationshipId === "new"
+                  ? "新增关系"
+                  : "编辑关系"}
+              </h4>
+
+              {editingRelationshipId === "new" && (
+                <div className="project-workspace-relationship-editor-grid">
+                  <label>
+                    人物一
+                    <select
+                      value={relationshipDraft.sourceCharacterId}
+                      onChange={(event) => {
+                        updateRelationshipDraftCharacter(
+                          "sourceCharacterId",
+                          event.target.value,
+                        );
+                      }}
+                    >
+                      {(relationshipData?.core_characters || []).map(
+                        (character) => (
+                          <option
+                            key={character.character_id}
+                            value={character.character_id}
+                          >
+                            {character.canonical_name}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+
+                  <label>
+                    人物二
+                    <select
+                      value={relationshipDraft.targetCharacterId}
+                      onChange={(event) => {
+                        updateRelationshipDraftCharacter(
+                          "targetCharacterId",
+                          event.target.value,
+                        );
+                      }}
+                    >
+                      {(relationshipData?.core_characters || []).map(
+                        (character) => (
+                          <option
+                            key={character.character_id}
+                            value={character.character_id}
+                          >
+                            {character.canonical_name}
+                          </option>
+                        ),
+                      )}
+                    </select>
+                  </label>
+                </div>
+              )}
+
+              <label>
+                关系
+                <input
+                  value={relationshipDraft.relationLabel}
+                  onChange={(event) => {
+                    updateRelationshipDraftField(
+                      "relationLabel",
+                      event.target.value,
+                    );
+                  }}
+                  placeholder="例如：兄弟、名义师徒，彼此提防"
+                />
+              </label>
+
+              <label>
+                说明
+                <textarea
+                  value={relationshipDraft.relationDescription}
+                  onChange={(event) => {
+                    updateRelationshipDraftField(
+                      "relationDescription",
+                      event.target.value,
+                    );
+                  }}
+                  rows={3}
+                />
+              </label>
+
+              <label>
+                原文证据
+                <textarea
+                  value={relationshipDraft.evidenceText}
+                  onChange={(event) => {
+                    updateRelationshipDraftField(
+                      "evidenceText",
+                      event.target.value,
+                    );
+                  }}
+                  rows={3}
+                />
+              </label>
+
+              <div className="project-workspace-script-actions">
+                <button
+                  type="button"
+                  className="project-workspace-analysis-button"
+                  onClick={handleSaveRelationship}
+                >
+                  保存关系
+                </button>
+
+                <button
+                  type="button"
+                  onClick={resetRelationshipDraft}
+                >
+                  取消
+                </button>
+              </div>
             </div>
           )}
         </section>
@@ -1695,8 +2053,25 @@ function ProjectWorkspacePage() {
         <section className="project-workspace-script">
           <div className="project-workspace-analysis-heading">
             <div>
-              <strong>剧本场景生成</strong>
-              <span>直接根据小说文本块生成可编辑剧本场景</span>
+              <div className="project-workspace-section-title-row">
+                <strong>剧本场景生成</strong>
+
+                <span
+                  className={
+                    importantRelationshipCount > 0
+                      ? "project-workspace-relationship-status active"
+                      : "project-workspace-relationship-status"
+                  }
+                >
+                  {importantRelationshipCount > 0
+                    ? `已关联 ${importantRelationshipCount} 条人物关系`
+                    : "未关联人物关系"}
+                </span>
+              </div>
+
+              <span>
+                根据小说原文和项目人物关系生成可编辑剧本场景
+              </span>
             </div>
 
             <div className="project-workspace-script-primary-actions">
@@ -1828,9 +2203,6 @@ function ProjectWorkspacePage() {
                     <span>{scene.heading}</span>
                     <small>
                       {scene.is_user_edited ? "已编辑" : "AI 生成"}
-                      {scene.warnings?.length > 0
-                        ? ` · ${scene.warnings.length} 条警告`
-                        : ""}
                     </small>
                   </button>
                 ))}
@@ -2004,14 +2376,6 @@ function ProjectWorkspacePage() {
                           }}
                         />
                       </label>
-
-                      {selectedScriptScene.warnings?.length > 0 && (
-                        <div className="project-workspace-script-warnings">
-                          {selectedScriptScene.warnings.map((warning) => (
-                            <span key={warning}>{warning}</span>
-                          ))}
-                        </div>
-                      )}
                     </>
                   )}
                 </article>

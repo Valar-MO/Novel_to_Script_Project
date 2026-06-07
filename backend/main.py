@@ -6,6 +6,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.narrative_analysis import router as narrative_analysis_router
 from backend.api.project_characters import router as project_characters_router
+from backend.api.project_relationships import (
+    router as project_relationships_router,
+)
 from backend.api.projects import router as projects_router
 from backend.api.script_generation import router as script_generation_router
 from backend.services.analysis_job_runner import analysis_job_runner
@@ -41,13 +44,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 app.include_router(projects_router)
 app.include_router(narrative_analysis_router)
 app.include_router(project_characters_router)
+app.include_router(project_relationships_router)
 app.include_router(script_generation_router)
 
 

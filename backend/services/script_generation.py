@@ -8,6 +8,9 @@ from typing import Any
 
 from backend.llm.base import LLMCallMetadata, LLMProvider
 from backend.llm.schemas import ScriptGenerationOutput
+from backend.services.project_relationships import (
+    load_relevant_project_relationships,
+)
 from backend.storage.database import DatabasePath, database_session
 
 
@@ -419,12 +422,58 @@ def _load_previous_scene_context(
     }
 
 
+def _character_names_in_text(
+    *,
+    chunk_text: str,
+    project_characters: list[dict[str, Any]],
+) -> list[str]:
+    names: list[str] = []
+    for character in project_characters:
+        candidate_names = [
+            str(character.get("canonical_name") or ""),
+            *[
+                str(value)
+                for value in character.get("aliases", [])
+            ],
+            *[
+                str(value)
+                for value in character.get("references", [])
+            ],
+        ]
+        if any(name and name in chunk_text for name in candidate_names):
+            names.append(str(character.get("canonical_name") or ""))
+
+    return [
+        name
+        for name in dict.fromkeys(names)
+        if name
+    ]
+
+
+def _format_relationship_context(
+    relationships: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "source": relationship["source_character_name"],
+            "target": relationship["target_character_name"],
+            "relation": relationship["relation_label"],
+            "description": relationship["relation_description"],
+            "source_type": relationship["source_type"],
+            "is_user_edited": relationship["is_user_edited"],
+            "evidence_text": relationship["evidence_text"],
+        }
+        for relationship in relationships
+    ]
+
+
 def _build_generation_messages(
     *,
     chunk_text: str,
     chunk_id: str,
     previous_tail: str,
     project_characters: list[dict[str, Any]],
+    relevant_relationships: list[dict[str, Any]],
     previous_scene_context: dict[str, Any] | None,
     generation_style: str,
     adaptation_mode: str,
@@ -456,6 +505,14 @@ def _build_generation_messages(
         "adaptation_mode": adaptation_mode,
         "previous_context_for_continuity_only": previous_tail,
         "project_characters": project_characters,
+        "relevant_project_relationships": _format_relationship_context(
+            relevant_relationships
+        ),
+        "relationship_rules": [
+            "User-edited relationships are confirmed user information and must be respected when writing address, dialogue, and interaction.",
+            "AI-extracted relationships are supporting references; if the current source text clearly differs, follow the current source text.",
+            "Only use relationships relevant to characters in the current source text.",
+        ],
         "previous_scene_context": previous_scene_context,
         "current_source_text_to_adapt": chunk_text,
         "output_rules": [
@@ -752,6 +809,15 @@ async def execute_script_generation_job(
                 connection=connection,
                 character_run_id=run_row["source_character_run_id"],
             )
+            character_names = _character_names_in_text(
+                chunk_text=str(chunk["text"]),
+                project_characters=project_characters,
+            )
+            relevant_relationships = load_relevant_project_relationships(
+                project_id=run_row["project_id"],
+                character_names=character_names,
+                database_path=database_path,
+            )
             previous_tail = _load_previous_tail(
                 connection=connection,
                 project_id=run_row["project_id"],
@@ -791,6 +857,7 @@ async def execute_script_generation_job(
                 chunk_id=unit["chunk_id"],
                 previous_tail=previous_tail,
                 project_characters=project_characters,
+                relevant_relationships=relevant_relationships,
                 previous_scene_context=previous_scene_context,
                 generation_style=request_settings["generation_style"],
                 adaptation_mode=request_settings["adaptation_mode"],
@@ -1746,6 +1813,15 @@ async def regenerate_script_scene(
             connection=connection,
             character_run_id=run_row["source_character_run_id"],
         )
+        character_names = _character_names_in_text(
+            chunk_text=source_text,
+            project_characters=project_characters,
+        )
+        relevant_relationships = load_relevant_project_relationships(
+            project_id=run_row["project_id"],
+            character_names=character_names,
+            database_path=database_path,
+        )
 
     system_content = (
         "你是可靠的中文小说剧本改编助手。"
@@ -1770,6 +1846,13 @@ async def regenerate_script_scene(
         },
         "source_text_to_regenerate": source_text,
         "project_characters": project_characters,
+        "relevant_project_relationships": _format_relationship_context(
+            relevant_relationships
+        ),
+        "relationship_rules": [
+            "User-edited relationships are confirmed user information and must be respected.",
+            "AI-extracted relationships are supporting references; current source text wins if it clearly differs.",
+        ],
         "user_instruction": instruction.strip(),
         "output_rules": [
             "Return exactly one scene in scenes.",

@@ -22,8 +22,6 @@ from backend.llm.base import (
     ResponseModelT,
 )
 from backend.llm.schemas import (
-    CharacterCandidateExtractionOutput,
-    EventFrameExtractionOutput,
     MentionExtractionOutput,
     RelationExtractionOutput,
     ScriptGenerationOutput,
@@ -63,7 +61,7 @@ class MockProvider(LLMProvider):
     """
     用于自动测试和无模型演示的 LLM Provider。
 
-    它不会访问网络，也不会调用 Ollama，而是返回预先配置
+    它不会访问网络，也不会调用真实云端模型，而是返回预先配置
     的 Pydantic 模型、字典或 JSON 字符串。
 
     支持为同一种响应模型排队多个结果，便于模拟不同文本块
@@ -269,8 +267,7 @@ class MockProvider(LLMProvider):
         """
         取得目标模型的下一条 Mock 响应。
 
-        MentionExtractionOutput, RelationExtractionOutput and
-        EventFrameExtractionOutput can return
+        MentionExtractionOutput and RelationExtractionOutput can return
         empty outputs by default, which keeps no-fact chunks easy to test.
         """
 
@@ -296,18 +293,6 @@ class MockProvider(LLMProvider):
             is RelationExtractionOutput
         ):
             return RelationExtractionOutput()
-
-        if (
-            response_model
-            is EventFrameExtractionOutput
-        ):
-            return EventFrameExtractionOutput()
-
-        if (
-            response_model
-            is CharacterCandidateExtractionOutput
-        ):
-            return CharacterCandidateExtractionOutput()
 
         if (
             response_model

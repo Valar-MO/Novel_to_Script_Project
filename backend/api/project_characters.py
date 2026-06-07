@@ -7,6 +7,8 @@ from backend.services.project_characters import (
     build_project_characters,
     get_latest_project_character_run,
     get_project_character_run,
+    suppress_ordinary_character,
+    update_character_pin,
 )
 from backend.storage.database import DatabasePath
 
@@ -27,7 +29,12 @@ class ProjectCharacterResponse(BaseModel):
     mention_ids: list[str]
     source_candidate_ids: list[str]
     evidence_count: int
+    is_user_pinned: bool
     input_quality: dict[str, Any]
+
+
+class ProjectCharacterPinRequest(BaseModel):
+    is_user_pinned: bool
 
 
 class ProjectCharacterMergeDecisionResponse(BaseModel):
@@ -179,5 +186,62 @@ def read_latest_project_character_run(
 
     if data is None:
         return None
+
+    return _to_response(data)
+
+
+@router.patch(
+    "/api/project-characters/{character_row_id}/pin",
+    response_model=ProjectCharacterRunResponse,
+    status_code=status.HTTP_200_OK,
+)
+def update_project_character_pin(
+    character_row_id: int,
+    request: ProjectCharacterPinRequest,
+    database_path: DatabasePath | None = Depends(
+        get_character_database_path
+    ),
+) -> ProjectCharacterRunResponse:
+    try:
+        data = update_character_pin(
+            character_row_id=character_row_id,
+            is_user_pinned=request.is_user_pinned,
+            database_path=database_path,
+        )
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+
+    return _to_response(data)
+
+
+@router.delete(
+    "/api/project-characters/{character_row_id}",
+    response_model=ProjectCharacterRunResponse,
+    status_code=status.HTTP_200_OK,
+)
+def delete_ordinary_project_character(
+    character_row_id: int,
+    database_path: DatabasePath | None = Depends(
+        get_character_database_path
+    ),
+) -> ProjectCharacterRunResponse:
+    try:
+        data = suppress_ordinary_character(
+            character_row_id=character_row_id,
+            database_path=database_path,
+        )
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
 
     return _to_response(data)

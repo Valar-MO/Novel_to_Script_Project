@@ -8,18 +8,8 @@ from typing import Any, Sequence
 
 from backend.llm.base import LLMCallMetadata, LLMProvider
 from backend.llm.schemas import (
-    CharacterCandidateExtractionOutput,
-    EventFrameExtractionOutput,
     MentionExtractionOutput,
     RelationExtractionOutput,
-)
-from backend.prompts.character_candidate_extraction import (
-    PROMPT_VERSION as CHARACTER_CANDIDATE_PROMPT_VERSION,
-    build_character_candidate_extraction_messages,
-)
-from backend.prompts.event_frame_extraction import (
-    PROMPT_VERSION as EVENT_FRAME_PROMPT_VERSION,
-    build_event_frame_extraction_messages,
 )
 from backend.prompts.mention_extraction import (
     PROMPT_VERSION as MENTION_PROMPT_VERSION,
@@ -37,15 +27,11 @@ from backend.storage.schema import create_schema
 
 PROMPT_VERSION = (
     f"{MENTION_PROMPT_VERSION}+"
-    f"{RELATION_PROMPT_VERSION}+"
-    f"{EVENT_FRAME_PROMPT_VERSION}+"
-    f"{CHARACTER_CANDIDATE_PROMPT_VERSION}"
+    f"{RELATION_PROMPT_VERSION}"
 )
-SCHEMA_VERSION = "mention_relation_event_character_schema_v5"
-MENTION_SCHEMA_VERSION = "mention_schema_v4"
-RELATION_SCHEMA_VERSION = "relation_schema_v3"
-EVENT_FRAME_SCHEMA_VERSION = "event_frame_schema_v5"
-CHARACTER_CANDIDATE_SCHEMA_VERSION = "character_candidate_schema_v3"
+SCHEMA_VERSION = "character_relation_mvp_schema_v1"
+MENTION_SCHEMA_VERSION = "character_mention_schema_v1"
+RELATION_SCHEMA_VERSION = "free_character_relation_schema_v1"
 ANALYSIS_STATUS_RUNNING = "running"
 ANALYSIS_STATUS_QUEUED = "queued"
 ANALYSIS_STATUS_INTERRUPTED = "interrupted"
@@ -54,8 +40,6 @@ ANALYSIS_STATUS_PARTIAL = "partial"
 ANALYSIS_STATUS_FAILED = "failed"
 MENTION_LIMIT = 40
 RELATION_LIMIT = 15
-EVENT_FRAME_LIMIT = 8
-CHARACTER_CANDIDATE_LIMIT = 20
 _logger = logging.getLogger(__name__)
 
 
@@ -1178,6 +1162,13 @@ def _filter_validated_mentions(
         evidence_start = mention.get("start_offset")
         evidence_end = mention.get("end_offset")
 
+        if mention_type != "character":
+            warnings.append(
+                f"mentions[{index}] 不是人物锚点，已丢弃："
+                f"{mention_text or evidence_text or 'empty'}"
+            )
+            continue
+
         if not mention.get("evidence_validated") or evidence_start is None:
             warnings.append(
                 f"mentions[{index}] 证据未能定位，已丢弃："
@@ -1307,61 +1298,6 @@ def _build_mention_candidates(
         for mention in mentions
     ]
 
-
-def _build_character_candidate_context(
-    *,
-    mentions: list[dict[str, Any]],
-    relations: list[dict[str, Any]],
-    event_frames: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Build compact context for the character candidate layer.
-
-    Strips evidence_text, confidence, offsets, validation flags, and warnings
-    to avoid repeating the same text across all layers.
-    """
-
-    compact_mentions = [
-        {
-            "mention_id": item.get("mention_id"),
-            "mention_type": item.get("mention_type"),
-            "mention_text": item.get("mention_text"),
-        }
-        for item in mentions
-        if item.get("mention_type") == "character"
-    ]
-
-    compact_relations = [
-        {
-            "relation_id": item.get("relation_id"),
-            "source_mention_id": item.get("source_mention_id"),
-            "relation": item.get("relation"),
-            "target_mention_id": item.get("target_mention_id"),
-        }
-        for item in relations
-    ]
-
-    compact_events = [
-        {
-            "event_frame_id": item.get("event_frame_id"),
-            "trigger_text": item.get("trigger_text"),
-            "event_type": item.get("event_type"),
-            "arguments": [
-                {
-                    "role": argument.get("role"),
-                    "mention_id": argument.get("mention_id"),
-                }
-                for argument in item.get("arguments", [])
-                if isinstance(argument, dict)
-            ],
-        }
-        for item in event_frames
-    ]
-
-    return {
-        "mentions": compact_mentions,
-        "relations": compact_relations,
-        "event_frames": compact_events,
-    }
 
 
 def _filter_validated_relations(
@@ -1493,386 +1429,6 @@ def _filter_validated_relations(
 
     return validated_result
 
-
-def _filter_validated_event_frames(
-    validated_result: dict[str, Any],
-    *,
-    mention_by_id: dict[str, dict[str, Any]],
-    allowed_mention_ids: set[str],
-    chunk_id: str,
-) -> dict[str, Any]:
-    """Validate event frames against anchored mentions with ID-text correspondence."""
-    raw_event_frames = validated_result.get("event_frames")
-
-    if not isinstance(raw_event_frames, list):
-        validated_result["event_frames"] = []
-        return validated_result
-
-    warnings = validated_result.get("warnings")
-
-    if not isinstance(warnings, list):
-        warnings = []
-
-    filtered_event_frames: list[dict[str, Any]] = []
-    seen_event_frames: set[tuple[str, str, str]] = set()
-    allowed_event_types = {
-        "movement",
-        "communication",
-        "perception",
-        "cognition",
-        "state",
-        "possession",
-        "social",
-        "creation",
-        "conflict",
-        "other",
-    }
-    event_type_aliases = {
-        "emotion": "state",
-        "emotional": "state",
-        "feeling": "state",
-        "sound": "perception",
-        "speech": "communication",
-        "dialogue": "communication",
-        "relationship": "social",
-        "action": "other",
-        "behavior": "other",
-        "sensory": "perception",
-    }
-
-    for index, event_frame in enumerate(raw_event_frames):
-        if not isinstance(event_frame, dict):
-            warnings.append(
-                f"event_frames[{index}] 不是对象，已丢弃。"
-            )
-            continue
-
-        trigger_text = str(
-            event_frame.get("trigger_text") or ""
-        ).strip()
-        event_type = str(
-            event_frame.get("event_type") or ""
-        ).strip()
-        normalized_event_type = event_type_aliases.get(
-            event_type.casefold(),
-            event_type.casefold(),
-        )
-        evidence_text = str(
-            event_frame.get("evidence_text") or ""
-        ).strip()
-        arguments = event_frame.get("arguments")
-
-        if not event_frame.get("evidence_validated"):
-            warnings.append(
-                f"event_frames[{index}] 证据未能定位，已丢弃："
-                f"{trigger_text}"
-            )
-            continue
-
-        if trigger_text and trigger_text not in evidence_text:
-            warnings.append(
-                f"event_frames[{index}] trigger_text 不在 evidence_text 中，"
-                f"已丢弃：{trigger_text}"
-            )
-            continue
-
-        if not isinstance(arguments, list):
-            warnings.append(
-                f"event_frames[{index}] arguments 不是数组，已丢弃。"
-            )
-            continue
-
-        if normalized_event_type not in allowed_event_types:
-            warnings.append(
-                f"event_frames[{index}] event_type 不在允许范围内，"
-                f"已改为 other：{event_type}"
-            )
-            normalized_event_type = "other"
-
-        event_frame["event_type"] = normalized_event_type
-
-        # P1-5: Validate each argument's mention_id against mention_text.
-        valid_arguments: list[dict[str, Any]] = []
-
-        for arg in arguments:
-            if not isinstance(arg, dict):
-                continue
-
-            arg_mention_id = str(arg.get("mention_id") or "").strip()
-            arg_mention_text = str(arg.get("mention_text") or "").strip()
-
-            if not arg_mention_id or arg_mention_id not in allowed_mention_ids:
-                continue
-
-            # Verify ID-text correspondence.
-            mention_info = mention_by_id.get(arg_mention_id)
-            text_match = (
-                mention_info is not None
-                and mention_info.get("mention_text", "").strip().casefold()
-                == arg_mention_text.casefold()
-            )
-
-            if not text_match:
-                warnings.append(
-                    f"event_frames[{index}] argument mention_id {arg_mention_id} "
-                    f"与 mention_text '{arg_mention_text}' 不一致，已丢弃该参数。"
-                )
-                continue
-
-            valid_arguments.append(arg)
-
-        # Discard the whole event if any argument failed validation.
-        if len(valid_arguments) != len(arguments):
-            continue
-
-        argument_key = "|".join(
-            sorted(
-                str(arg.get("mention_text") or "").strip().casefold()
-                + ":"
-                + str(arg.get("mention_id") or "").strip().casefold()
-                for arg in arguments
-                if isinstance(arg, dict)
-            )
-        )
-
-        # Use normalized_event_type for deduplication to avoid duplicates
-        # like "sound" and "perception" being treated as different events.
-        item_key = (
-            trigger_text.casefold(),
-            normalized_event_type,
-            argument_key,
-        )
-
-        if item_key in seen_event_frames:
-            warnings.append(
-                f"event_frames[{index}] 与已有事件重复，已丢弃。"
-            )
-            continue
-
-        seen_event_frames.add(item_key)
-        event_frame["arguments"] = valid_arguments
-        event_frame["_event_payload"] = {
-            "trigger": trigger_text,
-            "event_type": normalized_event_type,
-            "arguments": sorted(
-                str(arg.get("mention_id") or "").strip()
-                for arg in valid_arguments
-            ),
-            "start": event_frame.get("start_offset"),
-            "end": event_frame.get("end_offset"),
-        }
-        filtered_event_frames.append(event_frame)
-
-    for ev in filtered_event_frames:
-        ev["event_frame_id"] = _compute_stable_id(
-            chunk_id=chunk_id,
-            prefix="e",
-            payload=ev.pop("_event_payload"),
-        )
-
-    validated_result["event_frames"] = filtered_event_frames
-    validated_result["warnings"] = warnings
-
-    return validated_result
-
-
-def _filter_validated_character_candidates(
-    validated_result: dict[str, Any],
-    *,
-    mention_by_id: dict[str, dict[str, Any]],
-    allowed_character_mention_ids: set[str],
-    chunk_id: str,
-) -> dict[str, Any]:
-    """Validate character candidates with ID-text correspondence and canonical_name check."""
-    raw_candidates = validated_result.get("character_candidates")
-
-    if not isinstance(raw_candidates, list):
-        validated_result["character_candidates"] = []
-        return validated_result
-
-    warnings = validated_result.get("warnings")
-
-    if not isinstance(warnings, list):
-        warnings = []
-
-    filtered_candidates: list[dict[str, Any]] = []
-    seen_candidates: set[tuple[str, tuple[str, ...], str]] = set()
-    claimed_mention_ids: set[str] = set()
-    reference_only_terms = {
-        "他",
-        "她",
-        "它",
-        "他们",
-        "她们",
-        "它们",
-        "其",
-        "自己",
-        "母亲",
-        "父亲",
-        "父母",
-        "三叔",
-        "老人",
-        "少年",
-    }
-
-    for index, candidate in enumerate(raw_candidates):
-        if not isinstance(candidate, dict):
-            warnings.append(
-                f"character_candidates[{index}] 不是对象，已丢弃。"
-            )
-            continue
-
-        canonical_name = str(
-            candidate.get("canonical_name") or ""
-        ).strip()
-        evidence_text = str(
-            candidate.get("evidence_text") or ""
-        ).strip()
-        mention_ids = candidate.get("mention_ids")
-        aliases = candidate.get("aliases")
-        references = candidate.get("references")
-
-        if not candidate.get("evidence_validated"):
-            warnings.append(
-                f"character_candidates[{index}] 证据未能定位，已丢弃："
-                f"{canonical_name}"
-            )
-            continue
-
-        if not isinstance(mention_ids, list):
-            warnings.append(
-                f"character_candidates[{index}] mention_ids 不是数组，"
-                "已丢弃。"
-            )
-            continue
-
-        normalized_mention_ids = [
-            str(mention_id).strip()
-            for mention_id in mention_ids
-            if str(mention_id).strip()
-        ]
-
-        if not normalized_mention_ids:
-            warnings.append(
-                f"character_candidates[{index}] 没有有效 mention，已丢弃。"
-            )
-            continue
-
-        unknown_mention_ids = [
-            mention_id
-            for mention_id in normalized_mention_ids
-            if mention_id not in allowed_character_mention_ids
-        ]
-
-        if unknown_mention_ids:
-            warnings.append(
-                f"character_candidates[{index}] 引用了未定位的人物 mention，"
-                f"已丢弃：{', '.join(unknown_mention_ids)}"
-            )
-            continue
-
-        mention_texts = {
-            mention_by_id[mid].get("mention_text", "").strip().casefold()
-            for mid in normalized_mention_ids
-            if mid in mention_by_id
-        }
-        if (
-            canonical_name.casefold() not in mention_texts
-            and mention_texts
-        ):
-            warnings.append(
-                f"character_candidates[{index}] canonical_name '{canonical_name}' "
-                f"不在 mention_ids 对应的文本中，已丢弃。"
-            )
-            continue
-
-        # Fix-4: Check overlap using dedicated set, not seen.get(1).
-        overlapping = set(normalized_mention_ids) & claimed_mention_ids
-        if overlapping:
-            warnings.append(
-                f"character_candidates[{index}] mention_ids "
-                f"{sorted(overlapping)} 已被其他候选占用，已丢弃。"
-            )
-            continue
-
-        if not isinstance(aliases, list):
-            aliases = []
-
-        if not isinstance(references, list):
-            references = []
-
-        normalized_aliases = [
-            str(alias).strip()
-            for alias in aliases
-            if str(alias).strip()
-        ]
-        normalized_references = [
-            str(reference).strip()
-            for reference in references
-            if str(reference).strip()
-        ]
-        kept_aliases: list[str] = []
-        moved_references: list[str] = []
-
-        for alias in normalized_aliases:
-            if alias in reference_only_terms:
-                moved_references.append(alias)
-                continue
-
-            kept_aliases.append(alias)
-
-        normalized_aliases = list(dict.fromkeys(kept_aliases))
-        normalized_references = list(
-            dict.fromkeys(
-                [
-                    *normalized_references,
-                    *moved_references,
-                ]
-            )
-        )
-
-        item_key = (
-            canonical_name.casefold(),
-            tuple(
-                sorted(
-                    mention_id.casefold()
-                    for mention_id in normalized_mention_ids
-                )
-            ),
-            evidence_text,
-        )
-
-        if item_key in seen_candidates:
-            warnings.append(
-                f"character_candidates[{index}] 与已有人物候选重复，"
-                "已丢弃。"
-            )
-            continue
-
-        seen_candidates.add(item_key)
-        claimed_mention_ids.update(normalized_mention_ids)
-        candidate["mention_ids"] = normalized_mention_ids
-        candidate["aliases"] = normalized_aliases
-        candidate["references"] = normalized_references
-        candidate["_candidate_payload"] = {
-            "canonical": canonical_name,
-            "mention_ids": sorted(normalized_mention_ids),
-            "start": candidate.get("start_offset"),
-            "end": candidate.get("end_offset"),
-        }
-        filtered_candidates.append(candidate)
-
-    for cand in filtered_candidates:
-        cand["character_candidate_id"] = _compute_stable_id(
-            chunk_id=chunk_id,
-            prefix="c",
-            payload=cand.pop("_candidate_payload"),
-        )
-
-    validated_result["character_candidates"] = filtered_candidates
-    validated_result["warnings"] = warnings
-
-    return validated_result
 
 
 async def analyze_project_narrative(
@@ -2143,8 +1699,6 @@ async def analyze_project_narrative(
                         else ANALYSIS_STATUS_COMPLETED
                     ),
                     "relations": "pending",
-                    "event_frames": "pending",
-                    "character_candidates": "pending",
                 }
 
                 # Build ID → mention map for downstream ID-text validation (P1-5).
@@ -2161,30 +1715,12 @@ async def analyze_project_narrative(
                         chunk.chunk_id,
                     )
                     layer_statuses["relations"] = "skipped"
-                    layer_statuses["event_frames"] = "skipped"
-                    layer_statuses["character_candidates"] = "skipped"
                     validated_relations = {
                         "relations": [],
                         "warnings": [],
                     }
-                    validated_event_frames = {
-                        "event_frames": [],
-                        "warnings": [],
-                    }
-                    validated_character_candidates = {
-                        "character_candidates": [],
-                        "warnings": [],
-                    }
                     relation_raw_result = {
                         "relations": [],
-                        "warnings": [],
-                    }
-                    event_frame_raw_result = {
-                        "event_frames": [],
-                        "warnings": [],
-                    }
-                    character_candidate_raw_result = {
-                        "character_candidates": [],
                         "warnings": [],
                     }
                 else:
@@ -2301,313 +1837,10 @@ async def analyze_project_narrative(
                             cached_relations["validated_result_json"]
                         )
 
-                    # ── Layer 3: Event Frame Extraction ──────────────────
-
-                    event_input_hash = compute_json_hash(
-                        {
-                            "target_text": chunk.text,
-                            "mentions": mention_candidates,
-                        }
-                    )
-                    cached_event_frames = None
-
-                    if not force_reanalyze:
-                        cached_event_frames = _find_cached_layer_analysis(
-                            project_id=normalized_project_id,
-                            chunk=chunk,
-                            layer_name="event_frames",
-                            input_hash=event_input_hash,
-                            provider=resolved_provider,
-                            prompt_version=EVENT_FRAME_PROMPT_VERSION,
-                            schema_version=EVENT_FRAME_SCHEMA_VERSION,
-                            database_path=database_path,
-                        )
-
-                    if cached_event_frames is None:
-                        try:
-                            event_frame_extraction = await _run_layer(
-                                chunk_id=chunk.chunk_id,
-                                layer_name="event_frames",
-                                provider=resolved_provider,
-                                messages=build_event_frame_extraction_messages(
-                                    target_text=chunk.text,
-                                    mentions=mention_candidates,
-                                ),
-                                response_model=EventFrameExtractionOutput,
-                            )
-                            event_frame_raw_result = (
-                                event_frame_extraction.model_dump(mode="json")
-                            )
-                            validated_event_frames = validate_evidence(
-                                target_text=chunk.text,
-                                extraction=event_frame_extraction,
-                            )
-                            validated_event_frames = (
-                                _filter_validated_event_frames(
-                                    validated_event_frames,
-                                    mention_by_id=mention_by_id,
-                                    allowed_mention_ids=allowed_mention_ids,
-                                    chunk_id=chunk.chunk_id,
-                                )
-                            )
-                            event_frame_raw_result = _truncate_layer_items(
-                                event_frame_raw_result,
-                                field_name="event_frames",
-                                limit=EVENT_FRAME_LIMIT,
-                                layer_name="event_frames",
-                            )
-                            validated_event_frames = _truncate_layer_items(
-                                validated_event_frames,
-                                field_name="event_frames",
-                                limit=EVENT_FRAME_LIMIT,
-                                layer_name="event_frames",
-                            )
-
-                            _save_layer_analysis(
-                                project_id=normalized_project_id,
-                                chunk=chunk,
-                                layer_name="event_frames",
-                                input_hash=event_input_hash,
-                                provider=resolved_provider,
-                                prompt_version=EVENT_FRAME_PROMPT_VERSION,
-                                schema_version=EVENT_FRAME_SCHEMA_VERSION,
-                                result_json=json.dumps(
-                                    event_frame_raw_result,
-                                    ensure_ascii=False,
-                                ),
-                                validated_result_json=json.dumps(
-                                    validated_event_frames,
-                                    ensure_ascii=False,
-                                ),
-                                database_path=database_path,
-                            )
-                            layer_statuses["event_frames"] = (
-                                ANALYSIS_STATUS_COMPLETED
-                            )
-                        except Exception as error:
-                            chunk_status = ANALYSIS_STATUS_PARTIAL
-                            layer_statuses["event_frames"] = (
-                                ANALYSIS_STATUS_FAILED
-                            )
-                            warning = _build_layer_timeout_warning(
-                                chunk_id=chunk.chunk_id,
-                                layer_name="event_frames",
-                                error=error,
-                            )
-                            chunk_warnings.append(warning)
-                            (
-                                event_frame_raw_result,
-                                validated_event_frames,
-                            ) = _empty_layer_result(
-                                field_name="event_frames",
-                                warning=warning,
-                            )
-                    else:
-                        cached_layers += 1
-                        _increment_run_cached_layers(
-                            run_id=run_id,
-                            database_path=database_path,
-                        )
-                        layer_statuses["event_frames"] = "cached"
-                        event_frame_raw_result = json.loads(
-                            cached_event_frames["result_json"]
-                        )
-                        validated_event_frames = json.loads(
-                            cached_event_frames["validated_result_json"]
-                        )
-
-                    # ── Layer 4: Character Candidate Extraction ────────────
-
-                    allowed_character_mention_ids = {
-                        str(mention.get("mention_id"))
-                        for mention in validated_mentions["mentions"]
-                        if (
-                            mention.get("mention_type") == "character"
-                            and mention.get("mention_id")
-                        )
-                    }
-
-                    # Skip character candidate layer if no character mentions.
-                    if not allowed_character_mention_ids:
-                        _logger.info(
-                            "chunk=%s 无人形锚点，跳过人物候选层",
-                            chunk.chunk_id,
-                        )
-                        layer_statuses["character_candidates"] = "skipped"
-                        validated_character_candidates = {
-                            "character_candidates": [],
-                            "warnings": [],
-                        }
-                        character_candidate_raw_result = {
-                            "character_candidates": [],
-                            "warnings": [],
-                        }
-                    else:
-                        compact_context = _build_character_candidate_context(
-                            mentions=validated_mentions["mentions"],
-                            relations=validated_relations["relations"],
-                            event_frames=validated_event_frames[
-                                "event_frames"
-                            ],
-                        )
-                        character_candidate_input_hash = compute_json_hash(
-                            {
-                                "target_text": chunk.text,
-                                **compact_context,
-                            }
-                        )
-                        cached_character_candidates = None
-
-                        if not force_reanalyze:
-                            cached_character_candidates = (
-                                _find_cached_layer_analysis(
-                                    project_id=normalized_project_id,
-                                    chunk=chunk,
-                                    layer_name="character_candidates",
-                                    input_hash=(
-                                        character_candidate_input_hash
-                                    ),
-                                    provider=resolved_provider,
-                                    prompt_version=(
-                                        CHARACTER_CANDIDATE_PROMPT_VERSION
-                                    ),
-                                    schema_version=(
-                                        CHARACTER_CANDIDATE_SCHEMA_VERSION
-                                    ),
-                                    database_path=database_path,
-                                )
-                            )
-
-                        if cached_character_candidates is None:
-                            try:
-                                character_candidate_extraction = (
-                                    await _run_layer(
-                                        chunk_id=chunk.chunk_id,
-                                        layer_name="character_candidates",
-                                        provider=resolved_provider,
-                                        messages=(
-                                            build_character_candidate_extraction_messages(
-                                                target_text=chunk.text,
-                                                mentions=compact_context[
-                                                    "mentions"
-                                                ],
-                                                relations=compact_context[
-                                                    "relations"
-                                                ],
-                                                event_frames=compact_context[
-                                                    "event_frames"
-                                                ],
-                                            )
-                                        ),
-                                        response_model=(
-                                            CharacterCandidateExtractionOutput
-                                        ),
-                                    )
-                                )
-                                character_candidate_raw_result = (
-                                    character_candidate_extraction.model_dump(
-                                        mode="json"
-                                    )
-                                )
-                                validated_character_candidates = (
-                                    validate_evidence(
-                                        target_text=chunk.text,
-                                        extraction=(
-                                            character_candidate_extraction
-                                        ),
-                                    )
-                                )
-                                validated_character_candidates = (
-                                    _filter_validated_character_candidates(
-                                        validated_character_candidates,
-                                        mention_by_id=mention_by_id,
-                                        allowed_character_mention_ids=(
-                                            allowed_character_mention_ids
-                                        ),
-                                        chunk_id=chunk.chunk_id,
-                                    )
-                                )
-                                character_candidate_raw_result = _truncate_layer_items(
-                                    character_candidate_raw_result,
-                                    field_name="character_candidates",
-                                    limit=CHARACTER_CANDIDATE_LIMIT,
-                                    layer_name="character_candidates",
-                                )
-                                validated_character_candidates = _truncate_layer_items(
-                                    validated_character_candidates,
-                                    field_name="character_candidates",
-                                    limit=CHARACTER_CANDIDATE_LIMIT,
-                                    layer_name="character_candidates",
-                                )
-
-                                _save_layer_analysis(
-                                    project_id=normalized_project_id,
-                                    chunk=chunk,
-                                    layer_name="character_candidates",
-                                    input_hash=(
-                                        character_candidate_input_hash
-                                    ),
-                                    provider=resolved_provider,
-                                    prompt_version=(
-                                        CHARACTER_CANDIDATE_PROMPT_VERSION
-                                    ),
-                                    schema_version=(
-                                        CHARACTER_CANDIDATE_SCHEMA_VERSION
-                                    ),
-                                    result_json=json.dumps(
-                                        character_candidate_raw_result,
-                                        ensure_ascii=False,
-                                    ),
-                                    validated_result_json=json.dumps(
-                                        validated_character_candidates,
-                                        ensure_ascii=False,
-                                    ),
-                                    database_path=database_path,
-                                )
-                                layer_statuses[
-                                    "character_candidates"
-                                ] = ANALYSIS_STATUS_COMPLETED
-                            except Exception as error:
-                                chunk_status = ANALYSIS_STATUS_PARTIAL
-                                layer_statuses[
-                                    "character_candidates"
-                                ] = ANALYSIS_STATUS_FAILED
-                                warning = _build_layer_timeout_warning(
-                                    chunk_id=chunk.chunk_id,
-                                    layer_name="character_candidates",
-                                    error=error,
-                                )
-                                chunk_warnings.append(warning)
-                                (
-                                    character_candidate_raw_result,
-                                    validated_character_candidates,
-                                ) = _empty_layer_result(
-                                    field_name="character_candidates",
-                                    warning=warning,
-                                )
-                        else:
-                            cached_layers += 1
-                            _increment_run_cached_layers(
-                                run_id=run_id,
-                                database_path=database_path,
-                            )
-                            layer_statuses["character_candidates"] = (
-                                "cached"
-                            )
-                            character_candidate_raw_result = json.loads(
-                                cached_character_candidates["result_json"]
-                            )
-                            validated_character_candidates = json.loads(
-                                cached_character_candidates[
-                                    "validated_result_json"
-                                ]
-                            )
 
                 chunk_warnings.extend(
                     validated_mentions.get("warnings", [])
                     + validated_relations.get("warnings", [])
-                    + validated_event_frames.get("warnings", [])
-                    + validated_character_candidates.get("warnings", [])
                 )
 
                 raw_result = {
@@ -2615,16 +1848,6 @@ async def analyze_project_narrative(
                     "relations": relation_raw_result.get(
                         "relations",
                         [],
-                    ),
-                    "event_frames": event_frame_raw_result.get(
-                        "event_frames",
-                        [],
-                    ),
-                    "character_candidates": (
-                        character_candidate_raw_result.get(
-                            "character_candidates",
-                            [],
-                        )
                     ),
                     "warnings": {
                         "mentions": mention_raw_result.get(
@@ -2635,16 +1858,6 @@ async def analyze_project_narrative(
                             "warnings",
                             [],
                         ),
-                        "event_frames": event_frame_raw_result.get(
-                            "warnings",
-                            [],
-                        ),
-                        "character_candidates": (
-                            character_candidate_raw_result.get(
-                                "warnings",
-                                [],
-                            )
-                        ),
                         "chunk_level": chunk_warnings,
                     },
                     "layer_versions": {
@@ -2652,37 +1865,15 @@ async def analyze_project_narrative(
                         "mention_schema_version": MENTION_SCHEMA_VERSION,
                         "relation_prompt_version": RELATION_PROMPT_VERSION,
                         "relation_schema_version": RELATION_SCHEMA_VERSION,
-                        "event_prompt_version": EVENT_FRAME_PROMPT_VERSION,
-                        "event_schema_version": EVENT_FRAME_SCHEMA_VERSION,
-                        "candidate_prompt_version": (
-                            CHARACTER_CANDIDATE_PROMPT_VERSION
-                        ),
-                        "candidate_schema_version": (
-                            CHARACTER_CANDIDATE_SCHEMA_VERSION
-                        ),
                     },
                     "layer_statuses": layer_statuses,
                 }
                 validated_result = {
                     "mentions": validated_mentions["mentions"],
                     "relations": validated_relations["relations"],
-                    "event_frames": validated_event_frames[
-                        "event_frames"
-                    ],
-                    "character_candidates": (
-                        validated_character_candidates[
-                            "character_candidates"
-                        ]
-                    ),
                     "warnings": {
                         "mentions": validated_mentions["warnings"],
                         "relations": validated_relations["warnings"],
-                        "event_frames": validated_event_frames[
-                            "warnings"
-                        ],
-                        "character_candidates": (
-                            validated_character_candidates["warnings"]
-                        ),
                         "chunk_level": chunk_warnings,
                     },
                     "layer_versions": raw_result["layer_versions"],

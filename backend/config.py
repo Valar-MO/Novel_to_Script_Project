@@ -16,14 +16,12 @@ ENV_FILE_PATH = PROJECT_ROOT / ".env"
 
 
 LLMProviderName = Literal[
-    "ollama",
     "mock",
     "cloud_api",
     "deepseek",
 ]
 
 SUPPORTED_LLM_PROVIDERS: set[str] = {
-    "ollama",
     "mock",
     "cloud_api",
     "deepseek",
@@ -40,12 +38,7 @@ class LLMSettings:
 
     provider: LLMProviderName
 
-    ollama_base_url: str
-    ollama_model: str
-    ollama_timeout_seconds: float
-
     temperature: float
-    keep_alive: str
 
     cloud_api_base_url: str | None
     cloud_api_key: str | None
@@ -53,12 +46,6 @@ class LLMSettings:
     cloud_api_timeout_seconds: float
     cloud_api_reasoning_effort: str | None
     cloud_api_thinking_enabled: bool
-
-    @property
-    def uses_ollama(self) -> bool:
-        """当前是否使用本地 Ollama。"""
-
-        return self.provider == "ollama"
 
     @property
     def uses_mock(self) -> bool:
@@ -189,10 +176,13 @@ def get_llm_settings() -> LLMSettings:
     provider_value = (
         _read_string(
             "LLM_PROVIDER",
-            "ollama",
+            "deepseek",
         )
-        or "ollama"
+        or "deepseek"
     ).lower()
+
+    if provider_value == "ollama":
+        provider_value = "deepseek"
 
     if provider_value not in SUPPORTED_LLM_PROVIDERS:
         supported_values = ", ".join(
@@ -205,32 +195,6 @@ def get_llm_settings() -> LLMSettings:
             f"可选值：{supported_values}。"
         )
 
-    ollama_base_url = _normalize_base_url(
-        _read_string(
-            "OLLAMA_BASE_URL",
-            "http://127.0.0.1:11434",
-        )
-        or "http://127.0.0.1:11434"
-    )
-
-    ollama_model = (
-        _read_string(
-            "OLLAMA_MODEL",
-            "qwen3:8b",
-        )
-        or "qwen3:8b"
-    )
-
-    ollama_timeout_seconds = _read_float(
-        "OLLAMA_TIMEOUT_SECONDS",
-        180.0,
-    )
-
-    if ollama_timeout_seconds <= 0:
-        raise ConfigurationError(
-            "OLLAMA_TIMEOUT_SECONDS 必须大于 0。"
-        )
-
     temperature = _read_float(
         "LLM_TEMPERATURE",
         0.0,
@@ -240,14 +204,6 @@ def get_llm_settings() -> LLMSettings:
         raise ConfigurationError(
             "LLM_TEMPERATURE 必须位于 0 到 2 之间。"
         )
-
-    keep_alive = (
-        _read_string(
-            "LLM_KEEP_ALIVE",
-            "10m",
-        )
-        or "10m"
-    )
 
     cloud_api_base_url = (
         _read_string(
@@ -315,13 +271,7 @@ def get_llm_settings() -> LLMSettings:
 
     return LLMSettings(
         provider=provider_value,
-        ollama_base_url=ollama_base_url,
-        ollama_model=ollama_model,
-        ollama_timeout_seconds=(
-            ollama_timeout_seconds
-        ),
         temperature=temperature,
-        keep_alive=keep_alive,
         cloud_api_base_url=cloud_api_base_url,
         cloud_api_key=cloud_api_key,
         cloud_api_model=cloud_api_model,
