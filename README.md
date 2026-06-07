@@ -2,6 +2,10 @@
 
 Novel2Script 是一个本地运行的小说转剧本工具。当前版本主要用于演示从小说文本到可编辑剧本场景的基础流程。
 
+## 演示视频
+
+[点击查看 Novel2Script demo 视频](https://1drv.ms/v/c/22d0d0266d33c83b/IQCkqaMUXVDpSqUM6qGiCJSaAdJmo5f0eY_eK4eJpVds0No?e=yMEZkV)
+
 目前支持：
 
 1. 上传 `.txt` 小说文件；
