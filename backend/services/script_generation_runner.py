@@ -6,6 +6,8 @@ import logging
 from backend.llm.base import LLMProvider
 from backend.services.script_generation import (
     execute_script_generation_job,
+    finalize_script_generation_cancel,
+    is_script_generation_cancel_requested,
     mark_script_generation_job_failed,
     recover_script_generation_jobs,
 )
@@ -133,6 +135,16 @@ class ScriptGenerationRunner:
             run_id, database_path, provider = await self._queue.get()
 
             try:
+                if is_script_generation_cancel_requested(
+                    run_id=run_id,
+                    database_path=database_path or self._database_path,
+                ):
+                    finalize_script_generation_cancel(
+                        run_id=run_id,
+                        database_path=database_path or self._database_path,
+                    )
+                    continue
+
                 if provider is None:
                     provider = _create_provider_for_run(
                         run_id=run_id,

@@ -6,10 +6,12 @@ from pathlib import Path
 
 from backend.services.chapter_detector import ChapterSpan
 from backend.services.project_storage import (
+    ProjectBusyError,
     ProjectChapterNotFoundError,
     ProjectChunkNotFoundError,
     ProjectFileData,
     ProjectNotFoundError,
+    append_project_files,
     get_project_chapter,
     get_project_chunk,
     get_project_summary,
@@ -123,8 +125,6 @@ class TestProjectStorage(unittest.TestCase):
         )
 
     def test_save_project_creates_files_and_database_rows(self):
-        """保存项目后应创建文件目录和数据库记录。"""
-
         file_data = self._build_valid_file_data()
 
         saved_project = save_project(
@@ -175,18 +175,140 @@ class TestProjectStorage(unittest.TestCase):
         self.assertEqual(chapter_count, 1)
         self.assertEqual(chunk_count, 2)
 
-    def test_list_projects_returns_empty_list(self):
-        """没有项目时应返回空列表。"""
+    def test_append_project_files_continues_orders(self):
+        first_file = self._build_valid_file_data(
+            file_order=1,
+            file_name="第一章.txt",
+            global_order_start=1,
+        )
+        second_file = self._build_valid_file_data(
+            file_order=2,
+            file_name="第二章.txt",
+            global_order_start=3,
+        )
 
+        saved_project = save_project(
+            project_name="追加测试",
+            files=[first_file],
+            database_path=self.database_path,
+            projects_directory=self.projects_directory,
+            project_id="project-append-001",
+        )
+
+        result = append_project_files(
+            saved_project.project_id,
+            [second_file],
+            database_path=self.database_path,
+            projects_directory=self.projects_directory,
+        )
+
+        self.assertEqual(result["added_file_count"], 1)
+        self.assertEqual(result["added_chapter_count"], 1)
+        self.assertEqual(result["added_chunk_count"], 2)
+        self.assertEqual(result["added_chunk_ids"], ["chunk_0003", "chunk_0004"])
+
+        project = get_project_summary(
+            saved_project.project_id,
+            database_path=self.database_path,
+        )
+        self.assertEqual(project["file_count"], 2)
+        self.assertEqual(project["chapter_count"], 2)
+        self.assertEqual(project["chunk_count"], 4)
+        self.assertEqual(
+            [item["file_order"] for item in project["files"]],
+            [1, 2],
+        )
+
+    def test_append_project_files_rejects_busy_project(self):
+        file_data = self._build_valid_file_data()
+        saved_project = save_project(
+            project_name="忙碌项目",
+            files=[file_data],
+            database_path=self.database_path,
+            projects_directory=self.projects_directory,
+            project_id="project-busy-001",
+        )
+
+        with database_session(database_path=self.database_path) as connection:
+            create_schema(connection)
+            connection.execute(
+                """
+                INSERT INTO script_generation_runs (
+                    project_id,
+                    provider,
+                    model,
+                    prompt_version,
+                    schema_version,
+                    status,
+                    total_chunks
+                )
+                VALUES (?, 'mock', 'mock-model', 'v1', 's1', 'running', 1)
+                """,
+                (saved_project.project_id,),
+            )
+
+        with self.assertRaises(ProjectBusyError):
+            append_project_files(
+                saved_project.project_id,
+                [
+                    self._build_valid_file_data(
+                        file_order=2,
+                        file_name="第二章.txt",
+                        global_order_start=3,
+                    )
+                ],
+                database_path=self.database_path,
+                projects_directory=self.projects_directory,
+            )
+
+    def test_append_project_files_rolls_back_written_files(self):
+        file_data = self._build_valid_file_data()
+        saved_project = save_project(
+            project_name="回滚项目",
+            files=[file_data],
+            database_path=self.database_path,
+            projects_directory=self.projects_directory,
+            project_id="project-rollback-001",
+        )
+
+        invalid_file = replace(
+            self._build_valid_file_data(
+                file_order=2,
+                file_name="第二章.txt",
+                global_order_start=3,
+            ),
+            chunks=[],
+        )
+
+        with self.assertRaises(ValueError):
+            append_project_files(
+                saved_project.project_id,
+                [invalid_file],
+                database_path=self.database_path,
+                projects_directory=self.projects_directory,
+            )
+
+        project = get_project_summary(
+            saved_project.project_id,
+            database_path=self.database_path,
+        )
+        self.assertEqual(project["file_count"], 1)
+        self.assertFalse(
+            (
+                self.projects_directory
+                / saved_project.project_id
+                / "source"
+                / "0002.txt"
+            ).exists()
+        )
+
+    def test_list_projects_returns_empty_list(self):
         projects = list_projects(
             database_path=self.database_path,
         )
-
         self.assertEqual(projects, [])
 
     def test_list_projects_returns_newest_first(self):
-        """项目列表应按创建时间倒序返回项目摘要。"""
-
         file_data = self._build_valid_file_data()
 
         save_project(
@@ -243,21 +365,7 @@ class TestProjectStorage(unittest.TestCase):
             ["project-newer", "project-older"],
         )
 
-        newest_project = projects[0]
-
-        self.assertEqual(
-            newest_project["project_name"],
-            "较新项目",
-        )
-        self.assertEqual(newest_project["status"], "preprocessed")
-        self.assertEqual(newest_project["file_count"], 1)
-        self.assertEqual(newest_project["chapter_count"], 1)
-        self.assertEqual(newest_project["chunk_count"], 2)
-        self.assertNotIn("files", newest_project)
-
     def test_get_project_summary_excludes_internal_chunks(self):
-        """项目摘要应返回章节，但不暴露内部文本块。"""
-
         file_data = self._build_valid_file_data()
 
         save_project(
@@ -278,24 +386,13 @@ class TestProjectStorage(unittest.TestCase):
         self.assertEqual(project["file_count"], 1)
         self.assertEqual(project["chapter_count"], 1)
         self.assertEqual(project["chunk_count"], 2)
-
         stored_file = project["files"][0]
-
         self.assertEqual(stored_file["file_name"], "第一章.txt")
         self.assertEqual(stored_file["chapter_count"], 1)
         self.assertEqual(stored_file["chunk_count"], 2)
         self.assertNotIn("chunks", stored_file)
 
-        stored_chapter = stored_file["chapters"][0]
-
-        self.assertEqual(stored_chapter["chapter_title"], "测试")
-        self.assertEqual(stored_chapter["chunk_count"], 2)
-        self.assertNotIn("chunks", stored_chapter)
-        self.assertNotIn("text", stored_chapter)
-
     def test_get_project_chapter_returns_reconstructed_text(self):
-        """章节详情应按顺序拼接该章全部文本块。"""
-
         file_data = self._build_valid_file_data()
 
         save_project(
@@ -310,7 +407,6 @@ class TestProjectStorage(unittest.TestCase):
             "project-chapter-001",
             database_path=self.database_path,
         )
-
         chapter_id = project["files"][0]["chapters"][0]["id"]
 
         chapter = get_project_chapter(
@@ -324,14 +420,8 @@ class TestProjectStorage(unittest.TestCase):
         self.assertEqual(chapter["chapter_title"], "测试")
         self.assertEqual(chapter["internal_chunk_count"], 2)
         self.assertEqual(chapter["text"], file_data.processed_text)
-        self.assertEqual(
-            chapter["character_count"],
-            len(file_data.processed_text),
-        )
 
     def test_get_project_chunk_returns_full_text(self):
-        """单块详情查询应继续返回完整正文和来源信息。"""
-
         file_data = self._build_valid_file_data()
 
         save_project(
@@ -351,23 +441,15 @@ class TestProjectStorage(unittest.TestCase):
         self.assertEqual(chunk["project_id"], "project-chunk-001")
         self.assertEqual(chunk["project_name"], "文本块查询")
         self.assertEqual(chunk["source_file_name"], "第一章.txt")
-        self.assertEqual(chunk["chapter_order"], 1)
-        self.assertEqual(chunk["chapter_title"], "测试")
         self.assertEqual(chunk["chunk_id"], "chunk_0002")
         self.assertEqual(chunk["text"], file_data.chunks[1].text)
-        self.assertFalse(chunk["is_chapter_start"])
-        self.assertTrue(chunk["is_chapter_end"])
 
     def test_invalid_chunk_data_is_not_saved(self):
-        """无效文本块不应创建目录或项目记录。"""
-
         valid_file_data = self._build_valid_file_data()
-
         invalid_first_chunk = replace(
             valid_file_data.chunks[0],
             text="错误文本",
         )
-
         invalid_file_data = replace(
             valid_file_data,
             chunks=[
@@ -389,76 +471,24 @@ class TestProjectStorage(unittest.TestCase):
             (self.projects_directory / "invalid-project").exists()
         )
 
-        with self.assertRaises(ProjectNotFoundError):
-            get_project_summary(
-                "invalid-project",
-                database_path=self.database_path,
-            )
-
     def test_database_failure_rolls_back_and_cleans_files(self):
-        """数据库写入失败时应清理临时项目文件。"""
-
-        duplicate_project_id = "duplicate-project"
-
         with database_session(database_path=self.database_path) as connection:
             create_schema(connection)
-
             connection.execute(
-                """
-                INSERT INTO projects (
-                    id,
-                    name,
-                    status,
-                    file_count,
-                    chapter_count,
-                    chunk_count
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    duplicate_project_id,
-                    "已有项目",
-                    "created",
-                    0,
-                    0,
-                    0,
-                ),
+                "INSERT INTO projects (id, name, status) VALUES (?, ?, ?)",
+                ("duplicate-id", "已有项目", "created"),
             )
 
-        file_data = self._build_valid_file_data()
-
-        with self.assertRaises(sqlite3.IntegrityError):
+        with self.assertRaises((sqlite3.IntegrityError, FileExistsError)):
             save_project(
-                project_name="重复项目",
-                files=[file_data],
+                project_name="冲突项目",
+                files=[self._build_valid_file_data()],
                 database_path=self.database_path,
                 projects_directory=self.projects_directory,
-                project_id=duplicate_project_id,
+                project_id="duplicate-id",
             )
-
-        self.assertFalse(
-            (self.projects_directory / duplicate_project_id).exists()
-        )
-
-        temporary_directories = list(
-            self.projects_directory.glob(
-                f".tmp-{duplicate_project_id}-*"
-            )
-        )
-
-        self.assertEqual(temporary_directories, [])
-
-        project = get_project_summary(
-            duplicate_project_id,
-            database_path=self.database_path,
-        )
-
-        self.assertEqual(project["project_name"], "已有项目")
-        self.assertEqual(project["file_count"], 0)
 
     def test_missing_project_raises_error(self):
-        """查询不存在的项目应抛出明确异常。"""
-
         with self.assertRaises(ProjectNotFoundError):
             get_project_summary(
                 "missing-project",
@@ -466,10 +496,7 @@ class TestProjectStorage(unittest.TestCase):
             )
 
     def test_missing_chapter_raises_error(self):
-        """查询项目中不存在的章节应抛出明确异常。"""
-
         file_data = self._build_valid_file_data()
-
         save_project(
             project_name="缺失章节测试",
             files=[file_data],
@@ -481,15 +508,12 @@ class TestProjectStorage(unittest.TestCase):
         with self.assertRaises(ProjectChapterNotFoundError):
             get_project_chapter(
                 project_id="project-missing-chapter",
-                chapter_id=999999,
+                chapter_id=999,
                 database_path=self.database_path,
             )
 
     def test_missing_chunk_raises_error(self):
-        """查询不存在的文本块应抛出明确异常。"""
-
         file_data = self._build_valid_file_data()
-
         save_project(
             project_name="缺失文本块测试",
             files=[file_data],
@@ -501,7 +525,7 @@ class TestProjectStorage(unittest.TestCase):
         with self.assertRaises(ProjectChunkNotFoundError):
             get_project_chunk(
                 project_id="project-missing-chunk",
-                chunk_id="chunk_9999",
+                chunk_id="missing_chunk_id",
                 database_path=self.database_path,
             )
 

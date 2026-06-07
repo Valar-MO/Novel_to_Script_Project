@@ -33,6 +33,7 @@ async function readErrorMessage(response, fallbackMessage) {
 export async function startScriptGeneration(
   projectId,
   {
+    scope = "all",
     maxChunks = null,
     chunkIds = [],
     generationStyle = "standard",
@@ -54,8 +55,9 @@ export async function startScriptGeneration(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        scope,
         max_chunks: maxChunks,
-        chunk_ids: chunkIds,
+        chunk_ids: scope === "selected" ? chunkIds : [],
         generation_style: generationStyle,
         adaptation_mode: adaptationMode,
         provider,
@@ -104,6 +106,61 @@ export async function getScriptGenerationRun(
       await readErrorMessage(
         response,
         "读取剧本生成进度失败。",
+      ),
+    );
+  }
+
+  return response.json();
+}
+
+
+export async function getProjectScriptGenerationState(
+  projectId,
+  { signal } = {},
+) {
+  const response = await fetch(
+    (
+      `${API_BASE_URL}/api/projects/`
+      + `${encodeURIComponent(projectId)}/script-generation/state`
+    ),
+    {
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(
+        response,
+        "读取剧本生成状态失败。",
+      ),
+    );
+  }
+
+  return response.json();
+}
+
+
+export async function cancelScriptGeneration(
+  runId,
+  { signal } = {},
+) {
+  const response = await fetch(
+    (
+      `${API_BASE_URL}/api/script-generation/`
+      + `${encodeURIComponent(runId)}/cancel`
+    ),
+    {
+      method: "POST",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(
+        response,
+        "取消剧本生成失败。",
       ),
     );
   }

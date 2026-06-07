@@ -125,6 +125,28 @@ export function uploadProject(
 }
 
 
+export function appendProjectFiles(
+  projectId,
+  files,
+  { signal } = {},
+) {
+  const formData = new FormData();
+
+  files.forEach((file) => {
+    formData.append("files", file, file.name);
+  });
+
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}/files`,
+    {
+      method: "POST",
+      body: formData,
+      signal,
+    },
+  );
+}
+
+
 export function getProjects(
   { signal } = {},
 ) {

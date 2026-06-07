@@ -11,7 +11,7 @@ from backend.llm.schemas import ScriptGenerationOutput
 from backend.storage.database import DatabasePath, database_session
 
 
-PROMPT_VERSION = "script_generation_v1"
+PROMPT_VERSION = "script_generation_v2"
 SCHEMA_VERSION = "script_generation_schema_v1"
 
 STATUS_QUEUED = "queued"
@@ -20,17 +20,19 @@ STATUS_COMPLETED = "completed"
 STATUS_PARTIAL = "partial"
 STATUS_FAILED = "failed"
 STATUS_INTERRUPTED = "interrupted"
+STATUS_CANCELLED = "cancelled"
 
 UNIT_PENDING = "pending"
 UNIT_RUNNING = "running"
 UNIT_COMPLETED = "completed"
 UNIT_PARTIAL = "partial"
 UNIT_FAILED = "failed"
+UNIT_CANCELLED = "cancelled"
 
 
 class ActiveScriptGenerationError(RuntimeError):
     def __init__(self, active_run_id: int) -> None:
-        super().__init__("Project already has an active script generation job.")
+        super().__init__("该项目已有剧本生成任务正在执行。")
         self.active_run_id = active_run_id
 
 
@@ -102,6 +104,40 @@ def _latest_character_run_id(
     return int(row["id"]) if row else None
 
 
+def _resolve_requested_chunk_ids(
+    *,
+    project_id: str,
+    scope: str,
+    chunk_ids: list[str] | None,
+    database_path: DatabasePath | None,
+) -> list[str] | None:
+    normalized_scope = (scope or "all").strip().lower()
+
+    if normalized_scope == "all":
+        return None
+
+    if normalized_scope == "selected":
+        normalized_chunk_ids = [
+            chunk_id.strip()
+            for chunk_id in (chunk_ids or [])
+            if chunk_id and chunk_id.strip()
+        ]
+        if not normalized_chunk_ids:
+            raise ValueError(
+                "chunk_ids is required when scope is selected."
+            )
+        return normalized_chunk_ids
+
+    if normalized_scope == "pending":
+        state = get_project_script_generation_state(
+            project_id=project_id,
+            database_path=database_path,
+        )
+        return list(state["pending_script_chunk_ids"])
+
+    raise ValueError(f"Unsupported script generation scope: {scope}")
+
+
 def _load_project_chunks(
     *,
     project_id: str,
@@ -109,6 +145,9 @@ def _load_project_chunks(
     chunk_ids: list[str] | None = None,
     max_chunks: int | None = None,
 ) -> list[sqlite3.Row]:
+    if chunk_ids == []:
+        return []
+
     with database_session(database_path=database_path) as connection:
         project = connection.execute(
             "SELECT id FROM projects WHERE id = ?",
@@ -120,7 +159,7 @@ def _load_project_chunks(
         params: list[Any] = [project_id]
         where_clause = "WHERE sf.project_id = ?"
 
-        if chunk_ids:
+        if chunk_ids is not None:
             placeholders = ",".join("?" for _ in chunk_ids)
             where_clause += f" AND tc.chunk_id IN ({placeholders})"
             params.extend(chunk_ids)
@@ -165,34 +204,37 @@ def create_script_generation_job(
     requested_provider: str | None = None,
     requested_model: str | None = None,
     thinking_enabled: bool = False,
+    scope: str = "all",
 ) -> ScriptGenerationJobResult:
     normalized_project_id = project_id.strip()
     if not normalized_project_id:
         raise ValueError("project_id cannot be empty.")
 
-    normalized_chunk_ids = [
-        chunk_id.strip()
-        for chunk_id in (chunk_ids or [])
-        if chunk_id and chunk_id.strip()
-    ]
+    normalized_chunk_ids = _resolve_requested_chunk_ids(
+        project_id=normalized_project_id,
+        scope=scope,
+        chunk_ids=chunk_ids,
+        database_path=database_path,
+    )
     if max_chunks is not None and max_chunks <= 0:
         raise ValueError("max_chunks must be greater than 0.")
 
     chunks = _load_project_chunks(
         project_id=normalized_project_id,
         database_path=database_path,
-        chunk_ids=normalized_chunk_ids or None,
+        chunk_ids=normalized_chunk_ids,
         max_chunks=max_chunks,
     )
 
     request_payload = {
-        "chunk_ids": normalized_chunk_ids,
+        "chunk_ids": normalized_chunk_ids or [],
         "max_chunks": max_chunks,
         "generation_style": generation_style,
         "adaptation_mode": adaptation_mode,
         "provider": requested_provider or provider.provider_name,
         "model": requested_model or provider.model_name,
         "thinking_enabled": thinking_enabled,
+        "scope": scope,
     }
 
     with database_session(database_path=database_path) as connection:
@@ -392,7 +434,17 @@ def _build_generation_messages(
         "请把当前小说文本改写成可拍摄、可编辑的剧本场景。"
         "忠实保留主要事实、人物身份、事件顺序和直接对白归属。"
         "不要添加改变剧情走向或人物性格的新对白。"
+        "剧本正文只能包含观众能够直接看到或听到的内容。"
+        "禁止直接描述人物的内心、认知和抽象判断，例如："
+        "‘他知道’、‘他觉得’、‘他意识到’、‘他想起’、"
+        "‘脑中闪过’、‘心里想着’。"
+        "原文中的心理活动，只有在原文有充分依据时，"
+        "才能转化为动作、表情、停顿、声音或对白；"
+        "无法可靠转化时应压缩或省略，不得凭空增加行为。"
         "旁白可以压缩成动作、环境描写或必要的场面说明。"
+        "动作描写与对白分行书写。"
+        "对白使用明确的人物名称标识。"
+        "不要使用小说式全知旁白。"
         "默认不要加入特写、主观镜头、切黑等导演指令。"
         "人物名称优先使用项目级人物表中的 canonical_name。"
         "前文上下文只用于连续性判断，不得重复改写。"
@@ -411,6 +463,11 @@ def _build_generation_messages(
             "Use source_anchor.start_text and source_anchor.end_text copied from current_source_text_to_adapt.",
             "Do not return numeric source offsets.",
             "If unsure about a source range, choose the shortest clear source anchor and add a warning.",
+            "script_text must contain only visible actions, audible sounds, dialogue, and filmable environment descriptions.",
+            "Do not directly state thoughts, knowledge, memories, intentions, or emotions that cannot be observed.",
+            "Convert internal narration into observable behavior only when supported by the source text.",
+            "Write dialogue and action on separate lines.",
+            "Do not use parenthetical narration such as （他渐渐入睡）.",
             "Return only JSON that matches the schema.",
         ],
     }
@@ -509,6 +566,114 @@ def _request_settings(run_row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def is_script_generation_cancel_requested(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None = None,
+) -> bool:
+    with database_session(database_path=database_path) as connection:
+        row = connection.execute(
+            "SELECT cancel_requested_at FROM script_generation_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+    return bool(row and row["cancel_requested_at"])
+
+
+def request_script_generation_cancel(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None = None,
+) -> dict[str, Any]:
+    with database_session(database_path=database_path) as connection:
+        row = connection.execute(
+            "SELECT status, cancel_requested_at, cancelled_at FROM script_generation_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Script generation run does not exist: {run_id}")
+
+        if row["status"] in {STATUS_COMPLETED, STATUS_PARTIAL, STATUS_FAILED, STATUS_CANCELLED}:
+            return get_script_generation_run(
+                run_id=run_id,
+                database_path=database_path,
+            )
+
+        if row["cancel_requested_at"] is None:
+            connection.execute(
+                """
+                UPDATE script_generation_runs
+                SET cancel_requested_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (run_id,),
+            )
+
+    return get_script_generation_run(
+        run_id=run_id,
+        database_path=database_path,
+    )
+
+
+def finalize_script_generation_cancel(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None = None,
+) -> dict[str, Any]:
+    should_finish_run = False
+
+    with database_session(database_path=database_path) as connection:
+        cursor = connection.execute(
+            """
+            UPDATE script_generation_units
+            SET status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+              AND status IN (?, ?)
+            """,
+            (UNIT_CANCELLED, run_id, UNIT_PENDING, UNIT_RUNNING),
+        )
+
+        if cursor.rowcount <= 0:
+            should_finish_run = True
+            connection.execute(
+                """
+                UPDATE script_generation_runs
+                SET cancel_requested_at = NULL,
+                    cancelled_at = NULL,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (run_id,),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE script_generation_runs
+                SET status = ?,
+                    current_chunk_id = NULL,
+                    finished_at = CURRENT_TIMESTAMP,
+                    cancelled_at = COALESCE(cancelled_at, CURRENT_TIMESTAMP),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (STATUS_CANCELLED, run_id),
+            )
+
+    _refresh_run_progress(
+        run_id=run_id,
+        database_path=database_path,
+    )
+
+    if should_finish_run:
+        _finish_run(run_id=run_id, database_path=database_path)
+
+    return get_script_generation_run(
+        run_id=run_id,
+        database_path=database_path,
+    )
+
+
 async def execute_script_generation_job(
     *,
     run_id: int,
@@ -522,6 +687,9 @@ async def execute_script_generation_job(
         ).fetchone()
         if run_row is None:
             raise LookupError(f"Script generation run does not exist: {run_id}")
+
+        if run_row["status"] == STATUS_CANCELLED:
+            return
 
         if run_row["status"] not in {
             STATUS_QUEUED,
@@ -543,6 +711,16 @@ async def execute_script_generation_job(
         )
 
     while True:
+        if is_script_generation_cancel_requested(
+            run_id=run_id,
+            database_path=database_path,
+        ):
+            finalize_script_generation_cancel(
+                run_id=run_id,
+                database_path=database_path,
+            )
+            return
+
         with database_session(database_path=database_path) as connection:
             unit = connection.execute(
                 """
@@ -648,6 +826,16 @@ async def execute_script_generation_job(
             run_id=run_id,
             database_path=database_path,
         )
+
+        if is_script_generation_cancel_requested(
+            run_id=run_id,
+            database_path=database_path,
+        ):
+            finalize_script_generation_cancel(
+                run_id=run_id,
+                database_path=database_path,
+            )
+            return
 
     _finish_run(run_id=run_id, database_path=database_path)
 
@@ -902,11 +1090,19 @@ def _finish_run(
         successful = int(run["successful_chunks"])
         partial = int(run["partial_chunks"])
         failed = int(run["failed_chunks"])
+        cancelled = int(
+            connection.execute(
+                "SELECT COUNT(*) AS count FROM script_generation_units WHERE run_id = ? AND status = ?",
+                (run_id, UNIT_CANCELLED),
+            ).fetchone()["count"]
+        )
 
         if total == 0:
             final_status = STATUS_COMPLETED
         elif successful == total:
             final_status = STATUS_COMPLETED
+        elif cancelled > 0:
+            final_status = STATUS_CANCELLED
         elif successful + partial > 0:
             final_status = STATUS_PARTIAL
         elif failed > 0:
@@ -940,6 +1136,8 @@ def mark_script_generation_job_failed(
             SET status = ?,
                 error_message = ?,
                 finished_at = CURRENT_TIMESTAMP,
+                cancel_requested_at = NULL,
+                cancelled_at = NULL,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
@@ -983,9 +1181,10 @@ def recover_script_generation_jobs(
             SELECT id
             FROM script_generation_runs
             WHERE status = ?
+               OR status = ?
             ORDER BY id
             """,
-            (STATUS_QUEUED,),
+            (STATUS_QUEUED, STATUS_INTERRUPTED),
         ).fetchall()
 
     interrupted_ids = [int(row["id"]) for row in running_rows]
@@ -1059,10 +1258,164 @@ def get_script_generation_run(
         "started_at": run["started_at"],
         "finished_at": run["finished_at"],
         "heartbeat_at": run["heartbeat_at"],
+        "cancel_requested_at": run["cancel_requested_at"],
+        "cancelled_at": run["cancelled_at"],
         "created_at": run["created_at"],
         "updated_at": run["updated_at"],
         "units": units,
     }
+
+
+def get_project_script_generation_state(
+    *,
+    project_id: str,
+    database_path: DatabasePath | None = None,
+) -> dict[str, Any]:
+    with database_session(database_path=database_path) as connection:
+        project_row = connection.execute(
+            "SELECT id FROM projects WHERE id = ?",
+            (project_id,),
+        ).fetchone()
+        if project_row is None:
+            raise LookupError(f"Project does not exist: {project_id}")
+
+        latest_run = get_latest_script_generation_run(
+            project_id=project_id,
+            database_path=database_path,
+        )
+
+        scene_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS count FROM script_scenes WHERE project_id = ?",
+                (project_id,),
+            ).fetchone()["count"]
+        )
+
+        pending_rows = connection.execute(
+            """
+            SELECT tc.chunk_id, tc.global_order
+            FROM text_chunks tc
+            JOIN source_files sf ON sf.id = tc.source_file_id
+            WHERE sf.project_id = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM script_generation_units sgu
+                  WHERE sgu.project_id = sf.project_id
+                    AND sgu.chunk_database_id = tc.id
+                    AND sgu.status IN (?, ?)
+              )
+            ORDER BY tc.global_order
+            """,
+            (project_id, UNIT_COMPLETED, UNIT_PARTIAL),
+        ).fetchall()
+
+        never_attempted_rows = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM text_chunks tc
+            JOIN source_files sf ON sf.id = tc.source_file_id
+            WHERE sf.project_id = ?
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM script_generation_units sgu
+                  WHERE sgu.project_id = sf.project_id
+                    AND sgu.chunk_database_id = tc.id
+              )
+            """,
+            (project_id,),
+        ).fetchone()
+
+        pending_chunk_ids = [row["chunk_id"] for row in pending_rows]
+        never_attempted_count = int(never_attempted_rows["count"] or 0)
+        retryable_count = max(
+            len(pending_chunk_ids) - never_attempted_count,
+            0,
+        )
+
+    suggested_action = "all_generated"
+    if latest_run and latest_run["status"] in {STATUS_RUNNING, STATUS_QUEUED}:
+        suggested_action = "running"
+    elif latest_run and latest_run["cancel_requested_at"] and not latest_run["cancelled_at"]:
+        suggested_action = "cancelling"
+    elif pending_chunk_ids:
+        if never_attempted_count and retryable_count:
+            suggested_action = "continue_pending"
+        elif never_attempted_count:
+            suggested_action = (
+                "generate_all" if scene_count == 0 else "continue_new"
+            )
+        else:
+            suggested_action = "continue_remaining"
+    elif scene_count == 0:
+        suggested_action = "generate_all"
+
+    return {
+        "project_id": project_id,
+        "has_generated_scenes": scene_count > 0,
+        "latest_run": latest_run,
+        "pending_script_chunk_count": len(pending_chunk_ids),
+        "pending_script_chunk_ids": pending_chunk_ids,
+        "never_attempted_chunk_count": never_attempted_count,
+        "retryable_chunk_count": retryable_count,
+        "suggested_action": suggested_action,
+    }
+
+def resume_script_generation_job(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None = None,
+) -> ScriptGenerationJobResult:
+    with database_session(database_path=database_path) as connection:
+        row = connection.execute(
+            "SELECT * FROM script_generation_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"Script generation run does not exist: {run_id}")
+
+        if row["status"] != STATUS_CANCELLED:
+            raise ValueError("Only cancelled script generation jobs can be resumed.")
+
+        connection.execute(
+            """
+            UPDATE script_generation_units
+            SET status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+              AND status IN (?, ?)
+            """,
+            (UNIT_PENDING, run_id, UNIT_CANCELLED, UNIT_FAILED),
+        )
+        connection.execute(
+            """
+            UPDATE script_generation_runs
+            SET status = ?,
+                error_message = NULL,
+                finished_at = NULL,
+                current_chunk_id = NULL,
+                cancel_requested_at = NULL,
+                cancelled_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (STATUS_QUEUED, run_id),
+        )
+
+    refreshed = get_script_generation_run(
+        run_id=run_id,
+        database_path=database_path,
+    )
+    return ScriptGenerationJobResult(
+        run_id=refreshed["id"],
+        project_id=refreshed["project_id"],
+        status=refreshed["status"],
+        total_chunks=refreshed["total_chunks"],
+        processed_chunks=refreshed["processed_chunks"],
+        successful_chunks=refreshed["successful_chunks"],
+        partial_chunks=refreshed["partial_chunks"],
+        failed_chunks=refreshed["failed_chunks"],
+        scene_count=refreshed["scene_count"],
+    )
 
 
 def get_latest_script_generation_run(
@@ -1398,6 +1751,16 @@ async def regenerate_script_scene(
         "你是可靠的中文小说剧本改编助手。"
         "请只根据提供的原文重新生成当前这一场。"
         "不要改变主要事实、人物身份、事件顺序或对白归属。"
+        "剧本正文只能包含观众能够直接看到或听到的内容。"
+        "禁止直接描述人物的内心、认知和抽象判断，例如："
+        "‘他知道’、‘他觉得’、‘他意识到’、‘他想起’、"
+        "‘脑中闪过’、‘心里想着’。"
+        "原文中的心理活动，只有在原文有充分依据时，"
+        "才能转化为动作、表情、停顿、声音或对白；"
+        "无法可靠转化时应压缩或省略，不得凭空增加行为。"
+        "动作描写与对白分行书写。"
+        "对白使用明确的人物名称标识。"
+        "不要使用小说式全知旁白。"
         "只返回 JSON。"
     )
     user_payload = {
@@ -1411,6 +1774,11 @@ async def regenerate_script_scene(
         "output_rules": [
             "Return exactly one scene in scenes.",
             "source_anchor.start_text and end_text must be copied from source_text_to_regenerate.",
+            "script_text must contain only visible actions, audible sounds, dialogue, and filmable environment descriptions.",
+            "Do not directly state thoughts, knowledge, memories, intentions, or emotions that cannot be observed.",
+            "Convert internal narration into observable behavior only when supported by the source text.",
+            "Write dialogue and action on separate lines.",
+            "Do not use parenthetical narration such as （他渐渐入睡）.",
         ],
     }
 

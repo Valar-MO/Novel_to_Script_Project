@@ -11,6 +11,7 @@ import {
 
 import {
   ApiError,
+  appendProjectFiles,
   getProjectChunk,
   getProjectChapter,
   getProjectSummary,
@@ -23,7 +24,8 @@ import {
   startNarrativeAnalysis,
 } from "../api/narrativeAnalysis";
 import {
-  getLatestScriptGenerationRun,
+  cancelScriptGeneration,
+  getProjectScriptGenerationState,
   getScriptGenerationRun,
   getScriptGenerationScenes,
   regenerateScriptScene,
@@ -51,6 +53,7 @@ const SCRIPT_TERMINAL_STATUSES = new Set([
   "partial",
   "failed",
   "interrupted",
+  "cancelled",
 ]);
 
 const SCRIPT_ACTIVE_STATUSES = new Set([
@@ -182,6 +185,63 @@ function getEventTypeLabel(eventType) {
 }
 
 
+function buildEditedCharacters(text, originalCharacters = []) {
+  const originalByName = new Map(
+    originalCharacters.map((character) => [
+      character.name.trim(),
+      character,
+    ]),
+  );
+
+  const names = [
+    ...new Set(
+      text
+        .split(/[、，,\n]/)
+        .map((name) => name.trim())
+        .filter(Boolean),
+    ),
+  ];
+
+  return names.map((name) => ({
+    character_id: originalByName.get(name)?.character_id ?? null,
+    name,
+  }));
+}
+
+
+function getScriptActionLabel(scriptState) {
+  switch (scriptState?.suggested_action) {
+    case "continue_new":
+      return "继续生成新增内容";
+    case "continue_remaining":
+      return "继续生成剩余内容";
+    case "continue_pending":
+      return "继续生成待处理内容";
+    case "all_generated":
+      return "重新生成剧本";
+    case "running":
+      return "生成中……";
+    case "cancelling":
+      return "正在取消……";
+    case "generate_all":
+    default:
+      return "生成剧本";
+  }
+}
+
+
+function getScriptStartScope(scriptState) {
+  switch (scriptState?.suggested_action) {
+    case "continue_new":
+    case "continue_remaining":
+    case "continue_pending":
+      return "pending";
+    default:
+      return "all";
+  }
+}
+
+
 function ProjectWorkspacePage() {
   const { projectId } = useParams();
   const navigate = useNavigate();
@@ -216,13 +276,21 @@ function ProjectWorkspacePage() {
     setShowMentionDebug,
   ] = useState(false);
   const [isGeneratingScript, setIsGeneratingScript] = useState(false);
+  const [isCancellingScript, setIsCancellingScript] = useState(false);
+  const [scriptState, setScriptState] = useState(null);
   const [scriptRun, setScriptRun] = useState(null);
   const [scriptScenes, setScriptScenes] = useState([]);
   const [scriptError, setScriptError] = useState("");
+  const [appendFilesBusy, setAppendFilesBusy] = useState(false);
+  const [appendFilesMessage, setAppendFilesMessage] = useState("");
   const [selectedScriptSceneId, setSelectedScriptSceneId] = useState(null);
   const [editingSceneId, setEditingSceneId] = useState(null);
   const [sceneDraft, setSceneDraft] = useState({
     heading: "",
+    interiorExterior: "",
+    location: "",
+    timeOfDay: "",
+    charactersText: "",
     scriptText: "",
   });
   const [regeneratingSceneId, setRegeneratingSceneId] = useState(null);
@@ -243,6 +311,40 @@ function ProjectWorkspacePage() {
 
     return null;
   }, [project, selectedChapterId]);
+
+  async function refreshProjectSummary() {
+    const projectData = await getProjectSummary(projectId);
+    setProject(projectData);
+    setExpandedFileIds(
+      new Set(projectData.files.map((file) => file.id)),
+    );
+    return projectData;
+  }
+
+  async function refreshScriptGenerationState() {
+    const state = await getProjectScriptGenerationState(projectId);
+    setScriptState(state);
+
+    if (state.latest_run) {
+      setScriptRun(state.latest_run);
+
+      if (state.latest_run.id) {
+        const scenesData = await getScriptGenerationScenes(
+          state.latest_run.id,
+        );
+        setScriptScenes(scenesData.scenes || []);
+        setSelectedScriptSceneId((currentId) => (
+          currentId || scenesData.scenes?.[0]?.id || null
+        ));
+      }
+    } else {
+      setScriptRun(null);
+      setScriptScenes([]);
+      setSelectedScriptSceneId(null);
+    }
+
+    return state;
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -432,18 +534,32 @@ function ProjectWorkspacePage() {
 
     const controller = new AbortController();
 
-    getLatestScriptGenerationRun(projectId, {
+    getProjectScriptGenerationState(projectId, {
       signal: controller.signal,
     })
-      .then(async (latestRun) => {
-        if (!latestRun) {
+      .then(async (state) => {
+        setScriptState(state);
+        setIsGeneratingScript(
+          SCRIPT_ACTIVE_STATUSES.has(state.latest_run?.status),
+        );
+        setIsCancellingScript(
+          Boolean(
+            state.latest_run?.cancel_requested_at
+            && !state.latest_run?.cancelled_at,
+          ),
+        );
+
+        if (!state.latest_run) {
+          setScriptRun(null);
+          setScriptScenes([]);
+          setSelectedScriptSceneId(null);
           return;
         }
 
-        setScriptRun(latestRun);
+        setScriptRun(state.latest_run);
 
         const scenesData = await getScriptGenerationScenes(
-          latestRun.id,
+          state.latest_run.id,
           {
             signal: controller.signal,
           },
@@ -464,7 +580,7 @@ function ProjectWorkspacePage() {
         setScriptError(
           getErrorMessage(
             error,
-            "读取最新剧本生成结果失败。",
+            "读取剧本生成状态失败。",
           ),
         );
       });
@@ -602,6 +718,7 @@ function ProjectWorkspacePage() {
           );
           setScriptRun(runWithUnits);
           setIsGeneratingScript(false);
+          setIsCancellingScript(false);
           return;
         }
 
@@ -828,6 +945,7 @@ function ProjectWorkspacePage() {
       const result = await startScriptGeneration(
         projectId,
         {
+          scope: getScriptStartScope(scriptState),
           maxChunks: null,
           generationStyle: "standard",
           adaptationMode: "faithful",
@@ -842,7 +960,30 @@ function ProjectWorkspacePage() {
         ...result,
         units: [],
       });
+      await refreshScriptGenerationState();
     } catch (error) {
+      try {
+        const state = await refreshScriptGenerationState();
+        const latestRun = state?.latest_run;
+
+        if (
+          latestRun
+          && SCRIPT_ACTIVE_STATUSES.has(latestRun.status)
+        ) {
+          setIsGeneratingScript(true);
+          setIsCancellingScript(
+            Boolean(
+              latestRun.cancel_requested_at
+              && !latestRun.cancelled_at,
+            ),
+          );
+          setScriptError("");
+          return;
+        }
+      } catch {
+        // Fall through to the original start error.
+      }
+
       setIsGeneratingScript(false);
       setScriptError(
         getErrorMessage(
@@ -853,9 +994,44 @@ function ProjectWorkspacePage() {
     }
   }
 
-  async function handleSelectScriptScene(scene) {
-    setSelectedScriptSceneId(scene.id);
+  async function handleCancelScriptGeneration() {
+    const runId = scriptRun?.id || scriptRun?.run_id;
 
+    if (!runId) {
+      return;
+    }
+
+    const confirmed = window.confirm(
+      "确定要取消当前剧本生成吗？当前正在处理的文本块会先完成，然后停止后续生成。",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsCancellingScript(true);
+    setScriptError("");
+
+    try {
+      await cancelScriptGeneration(runId);
+      await refreshScriptGenerationState();
+    } catch (error) {
+      setScriptError(
+        getErrorMessage(
+          error,
+          "取消剧本生成失败。",
+        ),
+      );
+      setIsCancellingScript(false);
+    }
+  }
+
+  function handleSelectScriptScene(scene) {
+    setSelectedScriptSceneId(scene.id);
+    setActiveMention(null);
+  }
+
+  async function handleViewScriptSceneSource(scene) {
     const firstSource = scene.source_spans?.[0];
     if (!firstSource?.evidence_text) {
       return;
@@ -887,15 +1063,6 @@ function ProjectWorkspacePage() {
     }
   }
 
-  function handleHighlightSceneSource(scene) {
-    const firstSource = scene.source_spans?.[0];
-    if (firstSource?.evidence_text) {
-      setActiveMention({
-        evidence_text: firstSource.evidence_text,
-      });
-    }
-  }
-
   function handleStartSceneEdit(scene) {
     setEditingSceneId(scene.id);
     setSceneDraft({
@@ -903,6 +1070,9 @@ function ProjectWorkspacePage() {
       interiorExterior: scene.interior_exterior,
       location: scene.location,
       timeOfDay: scene.time_of_day,
+      charactersText: (scene.characters || [])
+        .map((character) => character.name)
+        .join("、"),
       scriptText: scene.script_text,
     });
   }
@@ -914,6 +1084,7 @@ function ProjectWorkspacePage() {
       interiorExterior: "",
       location: "",
       timeOfDay: "",
+      charactersText: "",
       scriptText: "",
     });
   }
@@ -930,7 +1101,10 @@ function ProjectWorkspacePage() {
           location: sceneDraft.location,
           timeOfDay: sceneDraft.timeOfDay,
           scriptText: sceneDraft.scriptText,
-          characters: scene.characters,
+          characters: buildEditedCharacters(
+            sceneDraft.charactersText,
+            scene.characters,
+          ),
           warnings: scene.warnings,
         },
       );
@@ -953,6 +1127,16 @@ function ProjectWorkspacePage() {
   }
 
   async function handleRegenerateScene(scene) {
+    if (scene.is_user_edited) {
+      const confirmed = window.confirm(
+        "当前场景包含人工修改，重新生成将覆盖这些内容。",
+      );
+
+      if (!confirmed) {
+        return;
+      }
+    }
+
     setScriptError("");
     setRegeneratingSceneId(scene.id);
 
@@ -1037,6 +1221,68 @@ function ProjectWorkspacePage() {
   function handleMentionClick(mention) {
     setActiveMention(mention);
   }
+
+  const appendFilesControl = (
+    <div className="project-workspace-append-files">
+      <label
+        className={
+          appendFilesBusy || isGeneratingScript || isCancellingScript
+            ? "project-workspace-append-files-button disabled"
+            : "project-workspace-append-files-button"
+        }
+      >
+        <span>
+          {appendFilesBusy ? "正在追加..." : "追加小说文件"}
+        </span>
+        <small>用于生成新增内容</small>
+        <input
+          type="file"
+          accept=".txt"
+          multiple
+          disabled={appendFilesBusy || isGeneratingScript || isCancellingScript}
+          onChange={async (event) => {
+            const selectedFiles = Array.from(event.target.files || []);
+            event.target.value = "";
+
+            if (selectedFiles.length === 0) {
+              return;
+            }
+
+            setAppendFilesBusy(true);
+            setAppendFilesMessage("");
+            setScriptError("");
+
+            try {
+              const result = await appendProjectFiles(
+                projectId,
+                selectedFiles,
+              );
+              await refreshProjectSummary();
+              await refreshScriptGenerationState();
+              setAppendFilesMessage(
+                `已追加 ${result.added_file_count} 个文件，新增 ${result.added_chunk_count} 个文本块。`,
+              );
+            } catch (error) {
+              setAppendFilesMessage(
+                getErrorMessage(
+                  error,
+                  "追加文件失败。",
+                ),
+              );
+            } finally {
+              setAppendFilesBusy(false);
+            }
+          }}
+        />
+      </label>
+
+      {appendFilesMessage && (
+        <p className="project-workspace-append-files-message">
+          {appendFilesMessage}
+        </p>
+      )}
+    </div>
+  );
 
   return (
     <main className="project-workspace-page">
@@ -1453,14 +1699,30 @@ function ProjectWorkspacePage() {
               <span>直接根据小说文本块生成可编辑剧本场景</span>
             </div>
 
-            <button
-              type="button"
-              className="project-workspace-analysis-button"
-              disabled={isGeneratingScript}
-              onClick={handleStartScriptGeneration}
-            >
-              {isGeneratingScript ? "正在生成..." : "生成剧本"}
-            </button>
+            <div className="project-workspace-script-primary-actions">
+              <button
+                type="button"
+                className="project-workspace-analysis-button"
+                disabled={
+                  isGeneratingScript
+                  || isCancellingScript
+                }
+                onClick={handleStartScriptGeneration}
+              >
+                {getScriptActionLabel(scriptState)}
+              </button>
+
+              {SCRIPT_ACTIVE_STATUSES.has(scriptRun?.status) && (
+                <button
+                  type="button"
+                  className="project-workspace-analysis-button secondary"
+                  disabled={isCancellingScript}
+                  onClick={handleCancelScriptGeneration}
+                >
+                  {isCancellingScript ? "正在取消……" : "取消生成"}
+                </button>
+              )}
+            </div>
           </div>
 
           {scriptError && (
@@ -1474,7 +1736,7 @@ function ProjectWorkspacePage() {
               <span>模型</span>
               <select
                 value={scriptModel}
-                disabled={isGeneratingScript}
+                disabled={isGeneratingScript || isCancellingScript}
                 onChange={(event) => {
                   setScriptModel(event.target.value);
                 }}
@@ -1489,7 +1751,7 @@ function ProjectWorkspacePage() {
               <input
                 type="checkbox"
                 checked={scriptThinkingEnabled}
-                disabled={isGeneratingScript}
+                disabled={isGeneratingScript || isCancellingScript}
                 onChange={(event) => {
                   setScriptThinkingEnabled(event.target.checked);
                 }}
@@ -1593,7 +1855,7 @@ function ProjectWorkspacePage() {
 
                       <div className="project-workspace-scene-meta-editor">
                         <label>
-                          <span>景别</span>
+                          <span>内/外景</span>
                           <input
                             value={sceneDraft.interiorExterior}
                             onChange={(event) => {
@@ -1631,6 +1893,20 @@ function ProjectWorkspacePage() {
                           />
                         </label>
                       </div>
+
+                      <label>
+                        <span>出场人物</span>
+                        <input
+                          value={sceneDraft.charactersText}
+                          placeholder="例如：韩立、舞岩、韩母"
+                          onChange={(event) => {
+                            setSceneDraft((currentDraft) => ({
+                              ...currentDraft,
+                              charactersText: event.target.value,
+                            }));
+                          }}
+                        />
+                      </label>
 
                       <label>
                         <span>剧本正文</span>
@@ -1676,7 +1952,7 @@ function ProjectWorkspacePage() {
                           <button
                             type="button"
                             className="secondary"
-                            onClick={() => handleSelectScriptScene(selectedScriptScene)}
+                            onClick={() => handleViewScriptSceneSource(selectedScriptScene)}
                           >
                             查看原文
                           </button>
@@ -1842,6 +2118,10 @@ function ProjectWorkspacePage() {
               })}
             </div>
           )}
+
+          <div className="project-workspace-sidebar-footer">
+            {appendFilesControl}
+          </div>
         </aside>
 
         <article className="project-workspace-reader">

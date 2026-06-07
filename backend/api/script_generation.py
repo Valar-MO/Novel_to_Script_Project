@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 from dataclasses import replace
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -15,9 +15,12 @@ from backend.services.script_generation import (
     ScriptGenerationJobResult,
     create_script_generation_job,
     get_latest_script_generation_run,
+    get_project_script_generation_state,
     get_script_generation_run,
     get_script_generation_scenes,
     regenerate_script_scene,
+    request_script_generation_cancel,
+    resume_script_generation_job,
     update_script_scene,
 )
 from backend.services.script_generation_runner import script_generation_runner
@@ -28,6 +31,7 @@ router = APIRouter(tags=["script-generation"])
 
 
 class ScriptGenerationStartRequest(BaseModel):
+    scope: Literal["all", "pending", "selected"] = "all"
     chunk_ids: list[str] = Field(default_factory=list)
     max_chunks: int | None = Field(default=None, ge=1)
     generation_style: str = "standard"
@@ -84,9 +88,22 @@ class ScriptGenerationRunResponse(BaseModel):
     started_at: str | None
     finished_at: str | None
     heartbeat_at: str | None
+    cancel_requested_at: str | None
+    cancelled_at: str | None
     created_at: str
     updated_at: str
     units: list[ScriptGenerationUnitResponse]
+
+
+class ScriptGenerationStateResponse(BaseModel):
+    project_id: str
+    has_generated_scenes: bool
+    latest_run: ScriptGenerationRunResponse | None
+    pending_script_chunk_count: int
+    pending_script_chunk_ids: list[str]
+    never_attempted_chunk_count: int
+    retryable_chunk_count: int
+    suggested_action: str
 
 
 class ScriptSceneSourceResponse(BaseModel):
@@ -262,6 +279,7 @@ async def start_script_generation(
             requested_provider=request.provider,
             requested_model=request.model,
             thinking_enabled=request.thinking_enabled,
+            scope=request.scope,
         )
         provider_enqueued = await script_generation_runner.enqueue(
             result.run_id,
@@ -299,6 +317,111 @@ async def start_script_generation(
     finally:
         if not provider_enqueued:
             await provider.close()
+
+    return _to_start_response(result)
+
+
+@router.get(
+    "/api/projects/{project_id}/script-generation/state",
+    response_model=ScriptGenerationStateResponse,
+)
+def read_project_script_generation_state(
+    project_id: str,
+    database_path: DatabasePath | None = Depends(
+        get_script_generation_database_path
+    ),
+) -> ScriptGenerationStateResponse:
+    try:
+        data = get_project_script_generation_state(
+            project_id=project_id,
+            database_path=database_path,
+        )
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+
+    latest_run = data.get("latest_run")
+    return ScriptGenerationStateResponse(
+        project_id=data["project_id"],
+        has_generated_scenes=data["has_generated_scenes"],
+        latest_run=(
+            _to_run_response(latest_run)
+            if latest_run is not None
+            else None
+        ),
+        pending_script_chunk_count=data["pending_script_chunk_count"],
+        pending_script_chunk_ids=data["pending_script_chunk_ids"],
+        never_attempted_chunk_count=data["never_attempted_chunk_count"],
+        retryable_chunk_count=data["retryable_chunk_count"],
+        suggested_action=data["suggested_action"],
+    )
+
+
+@router.post(
+    "/api/script-generation/{run_id}/cancel",
+    response_model=ScriptGenerationRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def cancel_script_generation(
+    run_id: int,
+    database_path: DatabasePath | None = Depends(
+        get_script_generation_database_path
+    ),
+) -> ScriptGenerationRunResponse:
+    try:
+        data = request_script_generation_cancel(
+            run_id=run_id,
+            database_path=database_path,
+        )
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+
+    return _to_run_response(data)
+
+
+@router.post(
+    "/api/script-generation/{run_id}/resume",
+    response_model=ScriptGenerationStartResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def resume_script_generation(
+    run_id: int,
+    database_path: DatabasePath | None = Depends(
+        get_script_generation_database_path
+    ),
+) -> ScriptGenerationStartResponse:
+    try:
+        result = resume_script_generation_job(
+            run_id=run_id,
+            database_path=database_path,
+        )
+        await script_generation_runner.enqueue(
+            run_id,
+            database_path=database_path,
+        )
+    except LookupError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except ActiveScriptGenerationError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "message": str(error),
+                "active_run_id": error.active_run_id,
+            },
+        ) from error
 
     return _to_start_response(result)
 

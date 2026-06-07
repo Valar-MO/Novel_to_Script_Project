@@ -2,7 +2,7 @@
 import sqlite3
 
 
-DATABASE_SCHEMA_VERSION = 7
+DATABASE_SCHEMA_VERSION = 8
 
 
 SCHEMA_SQL = """
@@ -505,6 +505,8 @@ CREATE TABLE IF NOT EXISTS script_generation_runs (
     started_at TEXT,
     finished_at TEXT,
     heartbeat_at TEXT,
+    cancel_requested_at TEXT,
+    cancelled_at TEXT,
 
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -669,6 +671,7 @@ def create_schema(
     connection.executescript(SCHEMA_SQL)
 
     _migrate_if_needed(connection)
+    _ensure_current_schema_integrity(connection)
 
     connection.execute(
         f"PRAGMA user_version = {DATABASE_SCHEMA_VERSION}"
@@ -696,6 +699,17 @@ def _migrate_if_needed(
         _migrate_to_v6(connection)
     if current < 7:
         _migrate_to_v7(connection)
+    if current < 8:
+        _migrate_to_v8(connection)
+
+
+def _ensure_current_schema_integrity(
+    connection: sqlite3.Connection,
+) -> None:
+    """Fill columns that may be missing in databases with stale user_version."""
+
+    _migrate_to_v7(connection)
+    _migrate_to_v8(connection)
 
 
 def _get_schema_version(
@@ -1025,134 +1039,69 @@ def _migrate_to_v6(
 def _migrate_to_v7(
     connection: sqlite3.Connection,
 ) -> None:
-    """v6 -> v7: add script scene generation artifacts."""
+    """v6 -> v7: ensure script generation tables and indexes exist."""
+
+    _add_column_if_missing(
+        connection,
+        "script_generation_runs",
+        "source_character_run_id",
+        "source_character_run_id INTEGER",
+    )
+    _add_column_if_missing(
+        connection,
+        "script_generation_runs",
+        "scene_count",
+        "scene_count INTEGER NOT NULL DEFAULT 0",
+    )
 
     connection.executescript(
         """
-        CREATE TABLE IF NOT EXISTS script_generation_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id TEXT NOT NULL,
-            source_character_run_id INTEGER,
-            provider TEXT NOT NULL,
-            model TEXT NOT NULL,
-            prompt_version TEXT NOT NULL,
-            schema_version TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'queued',
-            error_message TEXT,
-            total_chunks INTEGER NOT NULL DEFAULT 0,
-            processed_chunks INTEGER NOT NULL DEFAULT 0,
-            successful_chunks INTEGER NOT NULL DEFAULT 0,
-            partial_chunks INTEGER NOT NULL DEFAULT 0,
-            failed_chunks INTEGER NOT NULL DEFAULT 0,
-            scene_count INTEGER NOT NULL DEFAULT 0,
-            current_chunk_id TEXT,
-            request_json TEXT,
-            started_at TEXT,
-            finished_at TEXT,
-            heartbeat_at TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id)
-                REFERENCES projects(id)
-                ON DELETE CASCADE,
-            FOREIGN KEY (source_character_run_id)
-                REFERENCES project_character_runs(id)
-                ON DELETE SET NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS script_generation_units (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_id INTEGER NOT NULL,
-            project_id TEXT NOT NULL,
-            chunk_database_id INTEGER NOT NULL,
-            chunk_id TEXT NOT NULL,
-            chunk_order INTEGER NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            input_hash TEXT,
-            raw_response_json TEXT,
-            parsed_result_json TEXT,
-            warnings_json TEXT NOT NULL DEFAULT '[]',
-            error_message TEXT,
-            attempt_count INTEGER NOT NULL DEFAULT 0,
-            last_started_at TEXT,
-            last_finished_at TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (run_id)
-                REFERENCES script_generation_runs(id)
-                ON DELETE CASCADE,
-            FOREIGN KEY (project_id)
-                REFERENCES projects(id)
-                ON DELETE CASCADE,
-            FOREIGN KEY (chunk_database_id)
-                REFERENCES text_chunks(id)
-                ON DELETE CASCADE,
-            UNIQUE (run_id, chunk_database_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS script_scenes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id TEXT NOT NULL,
-            run_id INTEGER NOT NULL,
-            unit_id INTEGER NOT NULL,
-            scene_number INTEGER NOT NULL,
-            order_in_unit INTEGER NOT NULL DEFAULT 1,
-            heading TEXT NOT NULL,
-            interior_exterior TEXT NOT NULL,
-            location TEXT NOT NULL,
-            time_of_day TEXT NOT NULL,
-            characters_json TEXT NOT NULL,
-            script_text TEXT NOT NULL,
-            scene_summary TEXT NOT NULL DEFAULT '',
-            generation_status TEXT NOT NULL DEFAULT 'generated',
-            is_user_edited INTEGER NOT NULL DEFAULT 0
-                CHECK (is_user_edited IN (0, 1)),
-            warnings_json TEXT NOT NULL DEFAULT '[]',
-            adaptation_notes_json TEXT NOT NULL DEFAULT '[]',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (project_id)
-                REFERENCES projects(id)
-                ON DELETE CASCADE,
-            FOREIGN KEY (run_id)
-                REFERENCES script_generation_runs(id)
-                ON DELETE CASCADE,
-            FOREIGN KEY (unit_id)
-                REFERENCES script_generation_units(id)
-                ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS script_scene_sources (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            scene_id INTEGER NOT NULL,
-            chunk_database_id INTEGER NOT NULL,
-            chunk_id TEXT NOT NULL,
-            start_offset INTEGER NOT NULL,
-            end_offset INTEGER NOT NULL,
-            evidence_text TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (scene_id)
-                REFERENCES script_scenes(id)
-                ON DELETE CASCADE,
-            FOREIGN KEY (chunk_database_id)
-                REFERENCES text_chunks(id)
-                ON DELETE CASCADE
-        );
-
         CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_script_generation_per_project
-            ON script_generation_runs (project_id)
+            ON script_generation_runs (
+                project_id
+            )
             WHERE status IN ('queued', 'running');
 
         CREATE INDEX IF NOT EXISTS idx_script_generation_runs_project_created
-            ON script_generation_runs (project_id, created_at);
+            ON script_generation_runs (
+                project_id,
+                created_at
+            );
 
         CREATE INDEX IF NOT EXISTS idx_script_generation_units_run_chunk
-            ON script_generation_units (run_id, chunk_database_id);
+            ON script_generation_units (
+                run_id,
+                chunk_database_id
+            );
 
         CREATE INDEX IF NOT EXISTS idx_script_scenes_run_number
-            ON script_scenes (run_id, scene_number);
+            ON script_scenes (
+                run_id,
+                scene_number
+            );
 
         CREATE INDEX IF NOT EXISTS idx_script_scene_sources_scene
-            ON script_scene_sources (scene_id);
+            ON script_scene_sources (
+                scene_id
+            );
         """
+    )
+
+
+def _migrate_to_v8(
+    connection: sqlite3.Connection,
+) -> None:
+    """v7 -> v8: add script generation cancellation metadata."""
+
+    _add_column_if_missing(
+        connection,
+        "script_generation_runs",
+        "cancel_requested_at",
+        "cancel_requested_at TEXT",
+    )
+    _add_column_if_missing(
+        connection,
+        "script_generation_runs",
+        "cancelled_at",
+        "cancelled_at TEXT",
     )

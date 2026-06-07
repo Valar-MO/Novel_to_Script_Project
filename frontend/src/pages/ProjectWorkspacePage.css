@@ -132,6 +132,58 @@
   font-size: 13px;
 }
 
+.project-workspace-append-files {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.project-workspace-append-files-button {
+  display: inline-grid;
+  gap: 2px;
+  border: 1px solid #d8deea;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #ffffff;
+  color: #172033;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.project-workspace-append-files-button:hover {
+  border-color: #9fb1eb;
+  background: #f7f9ff;
+}
+
+.project-workspace-append-files-button.disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.project-workspace-append-files-button small {
+  color: #7f899b;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.project-workspace-append-files-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.project-workspace-append-files-message {
+  margin: 0;
+  color: #65728a;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .project-workspace-script-switch {
   border: 1px solid #d8deea;
   border-radius: 999px;
@@ -417,7 +469,7 @@
   display: grid;
   margin-top: 14px;
   gap: 14px;
-  grid-template-columns: minmax(220px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(260px, 350px) minmax(0, 1fr);
 }
 
 .project-workspace-script-list {
@@ -430,10 +482,10 @@
 
 .project-workspace-script-list-item {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   border: 1px solid #dfe7f4;
   border-radius: 10px;
-  padding: 10px 12px;
+  padding: 14px 16px;
   background: #ffffff;
   color: inherit;
   cursor: pointer;
@@ -449,13 +501,14 @@
 
 .project-workspace-script-list-item strong {
   color: #476bd9;
-  font-size: 11px;
+  font-size: 13px;
 }
 
 .project-workspace-script-list-item span {
   overflow: hidden;
   color: #202a3d;
-  font-size: 13px;
+  font-size: 16px;
+  line-height: 1.5;
   font-weight: 750;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -464,7 +517,8 @@
 .project-workspace-script-list-item small {
   overflow: hidden;
   color: #7e899c;
-  font-size: 10px;
+  font-size: 13px;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -486,7 +540,7 @@
 
 .project-workspace-script-detail-heading span {
   color: #7e899c;
-  font-size: 12px;
+  font-size: 14px;
 }
 
 .project-workspace-script-detail-heading h3 {
@@ -503,12 +557,12 @@
 .project-workspace-script-actions button {
   border: 0;
   border-radius: 9px;
-  padding: 8px 12px;
+  padding: 9px 14px;
   background: #476bd9;
   color: white;
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: 14px;
   font-weight: 750;
 }
 
@@ -533,18 +587,18 @@
 .project-workspace-script-meta span,
 .project-workspace-script-warnings span {
   border-radius: 999px;
-  padding: 5px 10px;
+  padding: 6px 12px;
   background: #edf2ff;
   color: #476bd9;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 750;
 }
 
 .project-workspace-script-characters {
   margin: 12px 0 0;
   color: #52617b;
-  font-size: 16px;
-  line-height: 1.7;
+  font-size: 18px;
+  line-height: 1.8;
 }
 
 .project-workspace-script-text {
@@ -557,8 +611,8 @@
   background: #ffffff;
   color: #243047;
   font-family: "Microsoft YaHei", Arial, sans-serif;
-  font-size: 17px;
-  line-height: 1.85;
+  font-size: 18px;
+  line-height: 1.9;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -628,6 +682,8 @@
 }
 
 .project-workspace-sidebar {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   overflow: hidden;
   border-right: 1px solid #e2e6ee;
@@ -658,9 +714,24 @@
 }
 
 .project-workspace-tree {
-  height: calc(100% - 72px);
+  min-height: 0;
+  flex: 1;
   overflow: auto;
-  padding: 10px 0 30px;
+  padding: 10px 0 18px;
+}
+
+.project-workspace-sidebar-footer {
+  border-top: 1px solid #e8ebf1;
+  padding: 14px 18px 18px;
+}
+
+.project-workspace-sidebar-footer .project-workspace-append-files {
+  display: grid;
+  align-items: stretch;
+}
+
+.project-workspace-sidebar-footer .project-workspace-append-files-button {
+  width: fit-content;
 }
 
 .project-workspace-file {

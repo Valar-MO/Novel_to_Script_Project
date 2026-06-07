@@ -14,10 +14,12 @@ from fastapi import (
 from pydantic import BaseModel, WithJsonSchema
 
 from backend.services.project_storage import (
+    ProjectBusyError,
     ProjectChapterNotFoundError,
     ProjectChunkNotFoundError,
     ProjectFileData,
     ProjectNotFoundError,
+    append_project_files,
     get_project_chapter,
     get_project_chunk,
     get_project_summary,
@@ -152,6 +154,14 @@ class ProjectUploadResponse(BaseModel):
     total_chunks: int
 
     files: list[UploadedFileSummary]
+
+
+class ProjectAppendFilesResponse(BaseModel):
+    project_id: str
+    added_file_count: int
+    added_chapter_count: int
+    added_chunk_count: int
+    added_chunk_ids: list[str]
 
 
 class StoredChapterSummary(BaseModel):
@@ -304,51 +314,20 @@ class ProjectChunkDetailResponse(BaseModel):
     created_at: str
 
 
-@router.post(
-    "/upload",
-    response_model=ProjectUploadResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="上传、处理并保存小说项目",
-)
-async def upload_project_files(
-    project_name: Annotated[
-        str,
-        Form(
-            min_length=1,
-            max_length=100,
-            description="小说改编项目名称",
-        ),
-    ],
-    files: Annotated[
-        list[BinaryUploadFile],
-        File(description="按照处理顺序上传的 TXT 文件"),
-    ],
-) -> ProjectUploadResponse:
-    """
-    创建一个新的小说项目。
-
-    处理过程包括文件校验、文本预处理、章节识别、
-    长文本分块以及项目持久化。
-    """
-
-    normalized_project_name = project_name.strip()
-
-    if not normalized_project_name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="项目名称不能为空。",
-        )
-
+async def _parse_uploaded_files(
+    files: list[BinaryUploadFile],
+    *,
+    starting_file_order: int = 1,
+    starting_global_chunk_order: int = 1,
+) -> tuple[
+    list[UploadedFileSummary],
+    list[ProjectFileData],
+    dict[str, int],
+]:
     if not files:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="请至少上传一个 TXT 文件。",
-        )
-
-    if len(files) > MAX_FILE_COUNT:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"每个项目最多上传 {MAX_FILE_COUNT} 个文件。",
         )
 
     file_summaries: list[UploadedFileSummary] = []
@@ -357,13 +336,12 @@ async def upload_project_files(
     total_size_bytes = 0
     total_characters = 0
     total_lines = 0
-
     total_processed_characters = 0
     total_processed_lines = 0
+    next_global_chunk_order = starting_global_chunk_order
 
-    next_global_chunk_order = 1
-
-    for order, uploaded_file in enumerate(files, start=1):
+    for offset, uploaded_file in enumerate(files):
+        order = starting_file_order + offset
         file_name = uploaded_file.filename or f"file_{order}.txt"
         file_suffix = Path(file_name).suffix.lower()
 
@@ -541,6 +519,76 @@ async def upload_project_files(
         )
         total_processed_lines += preprocessed.processed_line_count
 
+    totals = {
+        "total_size_bytes": total_size_bytes,
+        "total_characters": total_characters,
+        "total_lines": total_lines,
+        "total_processed_characters": total_processed_characters,
+        "total_processed_lines": total_processed_lines,
+        "total_chapters": sum(
+            summary.chapter_count for summary in file_summaries
+        ),
+        "total_chunks": sum(
+            summary.chunk_count for summary in file_summaries
+        ),
+    }
+
+    return file_summaries, storage_files, totals
+
+
+@router.post(
+    "/upload",
+    response_model=ProjectUploadResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="上传、处理并保存小说项目",
+)
+async def upload_project_files(
+    project_name: Annotated[
+        str,
+        Form(
+            min_length=1,
+            max_length=100,
+            description="小说改编项目名称",
+        ),
+    ],
+    files: Annotated[
+        list[BinaryUploadFile],
+        File(description="按照处理顺序上传的 TXT 文件"),
+    ],
+) -> ProjectUploadResponse:
+    """
+    创建一个新的小说项目。
+
+    处理过程包括文件校验、文本预处理、章节识别、
+    长文本分块以及项目持久化。
+    """
+
+    normalized_project_name = project_name.strip()
+
+    if not normalized_project_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="项目名称不能为空。",
+        )
+
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请至少上传一个 TXT 文件。",
+        )
+
+    if len(files) > MAX_FILE_COUNT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"每个项目最多上传 {MAX_FILE_COUNT} 个文件。",
+        )
+
+    file_summaries, storage_files, totals = await _parse_uploaded_files(
+        files,
+        starting_file_order=1,
+        starting_global_chunk_order=1,
+    )
+
     try:
         saved_project = save_project(
             project_name=normalized_project_name,
@@ -562,14 +610,96 @@ async def upload_project_files(
         project_name=saved_project.project_name,
         status=saved_project.status,
         file_count=saved_project.file_count,
-        total_size_bytes=total_size_bytes,
-        total_characters=total_characters,
-        total_lines=total_lines,
-        total_processed_characters=total_processed_characters,
-        total_processed_lines=total_processed_lines,
+        total_size_bytes=totals["total_size_bytes"],
+        total_characters=totals["total_characters"],
+        total_lines=totals["total_lines"],
+        total_processed_characters=totals["total_processed_characters"],
+        total_processed_lines=totals["total_processed_lines"],
         total_chapters=saved_project.chapter_count,
         total_chunks=saved_project.chunk_count,
         files=file_summaries,
+    )
+
+
+@router.post(
+    "/{project_id}/files",
+    response_model=ProjectAppendFilesResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="向已有项目追加 TXT 文件",
+)
+async def append_project_uploaded_files(
+    project_id: str,
+    files: Annotated[
+        list[BinaryUploadFile],
+        File(description="按照追加顺序上传的 TXT 文件"),
+    ],
+) -> ProjectAppendFilesResponse:
+    normalized_project_id = project_id.strip()
+    if not normalized_project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="project_id 不能为空。",
+        )
+
+    if not files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="请至少上传一个 TXT 文件。",
+        )
+
+    try:
+        project_summary = get_project_summary(normalized_project_id)
+    except ProjectNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在。",
+        ) from error
+    except sqlite3.Error as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="读取项目失败，请稍后重新尝试。",
+        ) from error
+
+    if project_summary["file_count"] + len(files) > MAX_FILE_COUNT:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"每个项目最多上传 {MAX_FILE_COUNT} 个文件。",
+        )
+
+    _, storage_files, _ = await _parse_uploaded_files(
+        files,
+        starting_file_order=project_summary["file_count"] + 1,
+        starting_global_chunk_order=project_summary["chunk_count"] + 1,
+    )
+
+    try:
+        result = append_project_files(
+            normalized_project_id,
+            storage_files,
+        )
+    except ProjectNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在。",
+        ) from error
+    except ProjectBusyError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except (sqlite3.Error, OSError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="追加文件失败，请稍后重新尝试。",
+        ) from error
+
+    return ProjectAppendFilesResponse(
+        **result,
     )
 
 
