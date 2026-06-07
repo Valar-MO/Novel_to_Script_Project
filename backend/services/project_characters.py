@@ -8,6 +8,11 @@ from typing import Any
 from backend.storage.database import DatabasePath, database_session
 
 
+DEFAULT_CORE_CHARACTER_LIMIT = 8
+MIN_CORE_CHUNK_COUNT = 2
+MIN_CORE_MENTION_COUNT = 2
+
+
 GENERIC_REFERENCE_NAMES = {
     "他",
     "她",
@@ -309,13 +314,11 @@ def _collect_inputs(
 ) -> tuple[
     list[CharacterCandidate],
     list[dict[str, Any]],
-    list[dict[str, Any]],
     list[InputGap],
     int,
 ]:
     candidates: list[CharacterCandidate] = []
     relations: list[dict[str, Any]] = []
-    event_frames: list[dict[str, Any]] = []
     gaps: list[InputGap] = []
     used_units = 0
     seen_candidate_ids: set[str] = set()
@@ -510,30 +513,7 @@ def _collect_inputs(
                 )
             )
 
-        if isinstance(result.get("event_frames"), list):
-            event_frames.extend(
-                [
-                    {
-                        **event_frame,
-                        "_source_unit_id": int(unit["id"]),
-                        "_chunk_id": str(unit["chunk_id"]),
-                    }
-                    for event_frame in result.get("event_frames", [])
-                    if isinstance(event_frame, dict)
-                ]
-            )
-        else:
-            gaps.append(
-                InputGap(
-                    source_unit_id=int(unit["id"]),
-                    chunk_id=str(unit["chunk_id"]),
-                    unit_status=unit_status,
-                    layer_name="event_frames",
-                    reason="event_frames_unavailable",
-                )
-            )
-
-    return candidates, relations, event_frames, gaps, used_units
+    return candidates, relations, gaps, used_units
 
 
 def _build_mention_to_candidate(
@@ -718,7 +698,6 @@ def _constraint_decisions(
     *,
     candidates: list[CharacterCandidate],
     relations: list[dict[str, Any]],
-    event_frames: list[dict[str, Any]],
 ) -> tuple[list[MergeDecision], set[tuple[str, str]], set[tuple[str, str]]]:
     mention_to_candidate = _build_mention_to_candidate(candidates)
     must_links: set[tuple[str, str]] = set()
@@ -778,41 +757,6 @@ def _constraint_decisions(
                     merge_score=0.0,
                     evidence=[],
                     conflicts=[evidence_item],
-                )
-            )
-
-    for event_frame in event_frames:
-        argument_candidate_ids = _unique(
-            [
-                mention_to_candidate.get(
-                    str(argument.get("mention_id") or "")
-                )
-                or ""
-                for argument in event_frame.get("arguments", [])
-                if isinstance(argument, dict)
-            ]
-        )
-        for left, right in combinations(argument_candidate_ids, 2):
-            pair = ordered(left, right)
-            if pair is None:
-                continue
-            cannot_links.add(pair)
-            decisions.append(
-                MergeDecision(
-                    left_candidate_id=pair[0],
-                    right_candidate_id=pair[1],
-                    decision="cannot_link",
-                    merge_score=0.0,
-                    evidence=[],
-                    conflicts=[
-                        {
-                            "type": "same_event_distinct_arguments",
-                            "event_frame_id": event_frame.get(
-                                "event_frame_id"
-                            ),
-                            "trigger_text": event_frame.get("trigger_text"),
-                        }
-                    ],
                 )
             )
 
@@ -911,6 +855,14 @@ def _build_characters(
                 "evidence_count": len(mention_ids),
                 "input_quality": {
                     "source_candidate_count": len(group_candidates),
+                    "chunk_count": len(
+                        {
+                            candidate.chunk_id
+                            for candidate in group_candidates
+                            if candidate.chunk_id
+                        }
+                    ),
+                    "mention_count": len(mention_ids),
                     "model_confidences": [
                         candidate.model_reported_confidence
                         for candidate in group_candidates
@@ -998,9 +950,10 @@ def _save_character_run_result(
                     mention_ids_json,
                     source_candidate_ids_json,
                     evidence_count,
+                    is_user_pinned,
                     input_quality_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     character_run_id,
@@ -1015,6 +968,7 @@ def _save_character_run_result(
                         ensure_ascii=False,
                     ),
                     character["evidence_count"],
+                    0,
                     json.dumps(
                         character["input_quality"],
                         ensure_ascii=False,
@@ -1136,7 +1090,7 @@ def build_project_characters(
         database_path=database_path,
     )
 
-    candidates, relations, event_frames, gaps, used_units = _collect_inputs(
+    candidates, relations, gaps, used_units = _collect_inputs(
         project_id=normalized_project_id,
         narrative_run_id=resolved_narrative_run_id,
         units=units,
@@ -1167,7 +1121,6 @@ def build_project_characters(
     constraint_decisions, must_links, cannot_links = _constraint_decisions(
         candidates=candidates,
         relations=relations,
-        event_frames=event_frames,
     )
     characters, scoring_decisions = _build_characters(
         candidates=candidates,
@@ -1248,6 +1201,19 @@ def get_project_character_run(
             """,
             (character_run_id,),
         ).fetchall()
+        suppression_rows = connection.execute(
+            """
+            SELECT character_id
+            FROM project_character_suppressions
+            WHERE project_id = ?
+            """,
+            (run_row["project_id"],),
+        ).fetchall()
+
+    suppressed_character_ids = {
+        str(row["character_id"])
+        for row in suppression_rows
+    }
 
     return {
         "id": run_row["id"],
@@ -1275,9 +1241,14 @@ def get_project_character_run(
                     row["source_candidate_ids_json"]
                 ),
                 "evidence_count": row["evidence_count"],
-                "input_quality": json.loads(row["input_quality_json"]),
+                "is_user_pinned": bool(row["is_user_pinned"]),
+                "input_quality": json.loads(
+                    row["input_quality_json"]
+                ),
             }
             for row in character_rows
+            if str(row["character_id"])
+            not in suppressed_character_ids
         ],
         "merge_decisions": [
             {
@@ -1329,3 +1300,231 @@ def get_latest_project_character_run(
         character_run_id=int(row["id"]),
         database_path=database_path,
     )
+
+
+def update_character_pin(
+    *,
+    character_row_id: int,
+    is_user_pinned: bool,
+    database_path: DatabasePath | None = None,
+) -> dict[str, Any]:
+    with database_session(database_path=database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT character_run_id
+            FROM project_characters
+            WHERE id = ?
+            """,
+            (character_row_id,),
+        ).fetchone()
+
+        if row is None:
+            raise LookupError(
+                f"Project character does not exist: {character_row_id}"
+            )
+
+        connection.execute(
+            """
+            UPDATE project_characters
+            SET is_user_pinned = ?
+            WHERE id = ?
+            """,
+            (1 if is_user_pinned else 0, character_row_id),
+        )
+        character_run_id = int(row["character_run_id"])
+
+    return get_project_character_run(
+        character_run_id=character_run_id,
+        database_path=database_path,
+    )
+
+
+def suppress_ordinary_character(
+    *,
+    character_row_id: int,
+    database_path: DatabasePath | None = None,
+) -> dict[str, Any]:
+    with database_session(
+        database_path=database_path,
+    ) as connection:
+        row = connection.execute(
+            """
+            SELECT
+                id,
+                character_run_id,
+                project_id,
+                character_id,
+                canonical_name,
+                is_user_pinned
+            FROM project_characters
+            WHERE id = ?
+            """,
+            (character_row_id,),
+        ).fetchone()
+
+    if row is None:
+        raise LookupError(
+            f"Project character does not exist: {character_row_id}"
+        )
+
+    character_run_id = int(row["character_run_id"])
+    project_id = str(row["project_id"])
+    character_id = str(row["character_id"])
+
+    core_characters = get_core_project_characters(
+        project_id=project_id,
+        character_run_id=character_run_id,
+        database_path=database_path,
+    )
+
+    core_character_ids = {
+        str(character["character_id"])
+        for character in core_characters
+    }
+
+    if bool(row["is_user_pinned"]):
+        raise ValueError(
+            "固定的核心人物不能删除，请先取消固定。"
+        )
+
+    if character_id in core_character_ids:
+        raise ValueError(
+            "自动核心人物不能删除，只能删除普通人物。"
+        )
+
+    with database_session(
+        database_path=database_path,
+    ) as connection:
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO project_character_suppressions (
+                project_id,
+                character_id,
+                character_name
+            )
+            VALUES (?, ?, ?)
+            """,
+            (
+                project_id,
+                character_id,
+                str(row["canonical_name"]),
+            ),
+        )
+
+        connection.execute(
+            """
+            DELETE FROM project_relationships
+            WHERE project_id = ?
+              AND (
+                  source_character_id = ?
+                  OR target_character_id = ?
+              )
+            """,
+            (
+                project_id,
+                character_id,
+                character_id,
+            ),
+        )
+
+    return get_project_character_run(
+        character_run_id=character_run_id,
+        database_path=database_path,
+    )
+
+
+def get_core_project_characters(
+    *,
+    project_id: str,
+    character_run_id: int | None = None,
+    limit: int = DEFAULT_CORE_CHARACTER_LIMIT,
+    database_path: DatabasePath | None = None,
+) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+
+    run = (
+        get_project_character_run(
+            character_run_id=character_run_id,
+            database_path=database_path,
+        )
+        if character_run_id is not None
+        else get_latest_project_character_run(
+            project_id=project_id,
+            database_path=database_path,
+        )
+    )
+
+    if run is None:
+        return []
+
+    if str(run["project_id"]) != str(project_id):
+        raise ValueError(
+            "character_run_id does not belong to project_id."
+        )
+
+    characters = list(run["characters"])
+
+    def get_quality_counts(
+        character: dict[str, Any],
+    ) -> tuple[int, int]:
+        input_quality = character.get("input_quality") or {}
+
+        chunk_count = int(
+            input_quality.get("chunk_count") or 0
+        )
+        mention_count = int(
+            input_quality.get("mention_count")
+            or character.get("evidence_count")
+            or 0
+        )
+
+        return chunk_count, mention_count
+
+    def sort_key(
+        character: dict[str, Any],
+    ) -> tuple[int, int, int, str]:
+        chunk_count, mention_count = get_quality_counts(character)
+        pinned = 1 if character.get("is_user_pinned") else 0
+
+        return (
+            pinned,
+            chunk_count,
+            mention_count,
+            str(character.get("canonical_name") or ""),
+        )
+
+    characters.sort(
+        key=sort_key,
+        reverse=True,
+    )
+
+    pinned = [
+        character
+        for character in characters
+        if character.get("is_user_pinned")
+    ]
+
+    auto: list[dict[str, Any]] = []
+
+    for character in characters:
+        if character.get("is_user_pinned"):
+            continue
+
+        chunk_count, mention_count = get_quality_counts(character)
+
+        if (
+            chunk_count >= MIN_CORE_CHUNK_COUNT
+            or mention_count >= MIN_CORE_MENTION_COUNT
+        ):
+            auto.append(character)
+
+    remaining_slots = max(
+        0,
+        limit - len(pinned),
+    )
+
+    return [
+        *pinned,
+        *auto[:remaining_slots],
+    ]

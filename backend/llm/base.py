@@ -90,13 +90,13 @@ class LLMProvider(ABC):
     Novel2Script 的统一大模型提供方接口。
 
     人物分析、事件分析和场景划分等业务模块只依赖
-    这个接口，不直接依赖 Ollama 或具体云端 SDK。
+    这个接口，不直接依赖具体云端 SDK。
     """
 
     @property
     @abstractmethod
     def provider_name(self) -> str:
-        """提供方名称，例如 ollama 或 mock。"""
+        """提供方名称，例如 deepseek 或 mock。"""
 
         raise NotImplementedError
 
@@ -150,7 +150,7 @@ class LLMProvider(ABC):
         """
         释放 Provider 使用的资源。
 
-        当前 Mock 和 Ollama 可能不需要显式关闭，
+        当前 Mock 可能不需要显式关闭，
         云端客户端以后可以覆盖该方法。
         """
 

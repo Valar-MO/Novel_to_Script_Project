@@ -6,15 +6,12 @@ from pathlib import Path
 
 from backend.llm.mock_provider import MockProvider
 from backend.llm.schemas import (
-    CharacterCandidateExtractionOutput,
-    EventFrameExtractionOutput,
     MentionExtractionOutput,
     RelationExtractionOutput,
 )
 from backend.services.chapter_detector import ChapterSpan
 from backend.services.narrative_analysis import (
     ANALYSIS_STATUS_COMPLETED,
-    _filter_validated_event_frames,
     _filter_validated_relations,
     analyze_project_narrative,
     get_narrative_analysis_run,
@@ -33,58 +30,65 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
-    def test_event_filter_normalizes_unknown_event_type(self):
-        result = _filter_validated_event_frames(
+    def test_relation_filter_requires_valid_mention_ids(self):
+        mention_by_id = {
+            "chunk_0001_m_001": {
+                "mention_id": "chunk_0001_m_001",
+                "mention_text": "Han Li",
+            },
+            "chunk_0001_m_002": {
+                "mention_id": "chunk_0001_m_002",
+                "mention_text": "Doctor Mo",
+            },
+        }
+
+        result = _filter_validated_relations(
             {
-                "event_frames": [
+                "relations": [
                     {
-                        "trigger_text": "叫作",
-                        "event_type": "naming",
-                        "arguments": [
-                            {
-                                "role": "patient",
-                                "mention_id": "chunk_0001_m_001",
-                                "mention_text": "韩立",
-                            }
-                        ],
-                        "evidence_text": "韩立被村里人叫作二愣子",
+                        "source_mention": "Han Li",
+                        "source_mention_id": "chunk_0001_m_001",
+                        "relation": "teacher",
+                        "target_mention": "Doctor Mo",
+                        "target_mention_id": "chunk_0001_m_002",
+                        "evidence_text": "Han Li met Doctor Mo",
                         "evidence_validated": True,
                         "confidence": 0.9,
                     },
                     {
-                        "trigger_text": "看见",
-                        "event_type": "perception",
-                        "arguments": [
-                            {
-                                "role": "actor",
-                                "mention_text": "韩立",
-                            }
-                        ],
-                        "evidence_text": "韩立看见山门",
+                        "source_mention": "Han Li",
+                        "source_mention_id": "chunk_0001_m_001",
+                        "relation": "teacher",
+                        "target_mention": "Missing",
+                        "target_mention_id": "chunk_0001_m_999",
+                        "evidence_text": "Han Li met Doctor Mo",
                         "evidence_validated": True,
                         "confidence": 0.9,
                     },
                 ],
                 "warnings": [],
             },
-            allowed_mention_ids={"chunk_0001_m_001"},
+            mention_by_id=mention_by_id,
+            allowed_mention_ids={
+                "chunk_0001_m_001",
+                "chunk_0001_m_002",
+            },
             chunk_id="chunk_0001",
         )
 
-        self.assertEqual(len(result["event_frames"]), 1)
-        self.assertEqual(result["event_frames"][0]["event_type"], "other")
-        self.assertEqual(
-            result["event_frames"][0]["event_frame_id"],
-            "chunk_0001_e_001",
+        self.assertEqual(len(result["relations"]), 1)
+        self.assertTrue(
+            result["relations"][0]["relation_id"].startswith(
+                "chunk_0001_r_"
+            )
         )
 
     def _save_project(self) -> str:
         processed_text = (
-            "Han Li entered the valley.\n\n"
+            "Han Li entered the valley with Doctor Mo.\n\n"
             "Doctor Mo waited beside the gate."
         )
-
-        split_at = processed_text.index("Doctor Mo")
+        split_at = processed_text.rindex("Doctor Mo")
 
         chapter = ChapterSpan(
             chapter_order=1,
@@ -162,7 +166,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
 
         return saved_project.project_id
 
-    async def test_analyze_project_persists_validated_results(self):
+    async def test_analyze_project_persists_character_relations(self):
         project_id = self._save_project()
         provider = MockProvider()
 
@@ -173,27 +177,15 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                     {
                         "mention_type": "character",
                         "mention_text": "Han Li",
-                        "evidence_text": "Han Li entered",
+                        "evidence_text": "Han Li",
                         "confidence": 0.95,
                     },
                     {
-                        "mention_type": "location",
-                        "mention_text": "valley",
-                        "evidence_text": "the valley",
-                        "confidence": 0.8,
+                        "mention_type": "character",
+                        "mention_text": "Doctor Mo",
+                        "evidence_text": "Doctor Mo",
+                        "confidence": 0.9,
                     },
-                    {
-                        "mention_type": "location",
-                        "mention_text": "valley",
-                        "evidence_text": "the valley",
-                        "confidence": 0.8,
-                    },
-                    {
-                        "mention_type": "object",
-                        "mention_text": "missing",
-                        "evidence_text": "not in chunk",
-                        "confidence": 0.7,
-                    }
                 ],
             },
         )
@@ -203,54 +195,18 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                 "relations": [
                     {
                         "source_mention": "Han Li",
-                        "source_mention_id": "chunk_0001_m_001",
-                        "relation": "entered",
-                        "target_mention": "valley",
-                        "target_mention_id": "chunk_0001_m_002",
-                        "evidence_text": "Han Li entered the valley",
+                        "source_mention_id": (
+                            "chunk_0001_m_character_0_6"
+                        ),
+                        "relation": "companion",
+                        "target_mention": "Doctor Mo",
+                        "target_mention_id": (
+                            "chunk_0001_m_character_31_40"
+                        ),
+                        "evidence_text": (
+                            "Han Li entered the valley with Doctor Mo"
+                        ),
                         "confidence": 0.9,
-                    }
-                ],
-            },
-        )
-        provider.register_response(
-            EventFrameExtractionOutput,
-            {
-                "event_frames": [
-                    {
-                        "trigger_text": "entered",
-                        "event_type": "movement",
-                        "arguments": [
-                            {
-                                "role": "actor",
-                                "mention_id": "chunk_0001_m_001",
-                                "mention_text": "Han Li",
-                            },
-                            {
-                                "role": "destination",
-                                "mention_id": "chunk_0001_m_002",
-                                "mention_text": "valley",
-                            },
-                        ],
-                        "evidence_text": "Han Li entered the valley",
-                        "confidence": 0.9,
-                    }
-                ],
-            },
-        )
-        provider.register_response(
-            CharacterCandidateExtractionOutput,
-            {
-                "character_candidates": [
-                    {
-                        "canonical_name": "Han Li",
-                        "mention_ids": [
-                            "chunk_0001_m_001",
-                        ],
-                        "aliases": ["Han Li"],
-                        "references": [],
-                        "evidence_text": "Han Li entered the valley",
-                        "confidence": 0.92,
                     }
                 ],
             },
@@ -262,16 +218,8 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                     {
                         "mention_type": "character",
                         "mention_text": "Doctor Mo",
-                        "evidence_text": "Doctor Mo waited",
+                        "evidence_text": "Doctor Mo",
                         "confidence": 0.93,
-                    },
-                    {
-                        "mention_type": "object",
-                        "mention_text": "gate",
-                        "evidence_text": (
-                            "the gate"
-                        ),
-                        "confidence": 0.9,
                     }
                 ],
             },
@@ -289,7 +237,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.successful_chunks, 2)
         self.assertEqual(result.failed_chunks, 0)
         self.assertEqual(result.cached_chunks, 0)
-        self.assertEqual(provider.call_count, 8)
+        self.assertEqual(provider.call_count, 4)
 
         connection = sqlite3.connect(self.database_path)
         try:
@@ -299,7 +247,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
-        self.assertEqual(layer_cache_count, 8)
+        self.assertEqual(layer_cache_count, 4)
 
         saved_run = get_narrative_analysis_run(
             run_id=result.run_id,
@@ -313,54 +261,24 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
             saved_run["units"][0]["validated_result_json"]
         )
 
-        self.assertTrue(
-            first_validated["mentions"][0]["evidence_validated"]
-        )
-        self.assertEqual(
-            len(first_validated["mentions"]),
-            2,
-        )
+        self.assertEqual(len(first_validated["mentions"]), 2)
         self.assertEqual(
             first_validated["relations"][0]["source_mention"],
             "Han Li",
         )
         self.assertEqual(
-            first_validated["relations"][0]["source_mention_id"],
-            "chunk_0001_m_001",
+            first_validated["relations"][0]["target_mention"],
+            "Doctor Mo",
         )
-        self.assertEqual(
-            first_validated["event_frames"][0]["trigger_text"],
-            "entered",
+        self.assertNotIn("event_frames", first_validated)
+        self.assertNotIn("character_candidates", first_validated)
+        self.assertNotIn(
+            "event_frames",
+            first_validated["layer_statuses"],
         )
-        self.assertEqual(
-            first_validated["event_frames"][0]["arguments"][0][
-                "mention_id"
-            ],
-            "chunk_0001_m_001",
-        )
-        self.assertEqual(
-            first_validated["character_candidates"][0][
-                "canonical_name"
-            ],
-            "Han Li",
-        )
-        self.assertEqual(
-            first_validated["character_candidates"][0][
-                "mention_ids"
-            ],
-            ["chunk_0001_m_001"],
-        )
-        self.assertTrue(
-            any(
-                "重复" in warning
-                for warning in first_validated["warnings"]["mentions"]
-            )
-        )
-        self.assertTrue(
-            any(
-                "证据未能定位" in warning
-                for warning in first_validated["warnings"]["mentions"]
-            )
+        self.assertNotIn(
+            "character_candidates",
+            first_validated["layer_statuses"],
         )
 
     async def test_analyze_project_can_limit_chunks(self):
@@ -392,7 +310,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                     {
                         "mention_type": "character",
                         "mention_text": "Han Li",
-                        "evidence_text": "Han Li entered",
+                        "evidence_text": "Han Li",
                         "confidence": 0.95,
                     }
                 ],
@@ -412,7 +330,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
             max_chunks=1,
         )
 
-        self.assertEqual(provider.call_count, 4)
+        self.assertEqual(provider.call_count, 2)
         self.assertEqual(first_result.cached_chunks, 0)
         self.assertEqual(second_result.cached_chunks, 1)
 
@@ -437,7 +355,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                     {
                         "mention_type": "character",
                         "mention_text": "Doctor Mo",
-                        "evidence_text": "Doctor Mo waited",
+                        "evidence_text": "Doctor Mo",
                         "confidence": 0.93,
                     }
                 ],
@@ -450,7 +368,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                     {
                         "mention_type": "character",
                         "mention_text": "Doctor Mo",
-                        "evidence_text": "Doctor Mo waited",
+                        "evidence_text": "Doctor Mo",
                         "confidence": 0.94,
                     }
                 ],
@@ -472,7 +390,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
             previous_context_chars=10,
         )
 
-        self.assertEqual(provider.call_count, 12)
+        self.assertEqual(provider.call_count, 5)
 
     async def test_force_reanalyze_bypasses_cache(self):
         project_id = self._save_project()
@@ -485,7 +403,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                     {
                         "mention_type": "character",
                         "mention_text": "Han Li",
-                        "evidence_text": "Han Li entered",
+                        "evidence_text": "Han Li",
                         "confidence": 0.95,
                     }
                 ],
@@ -498,7 +416,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
                     {
                         "mention_type": "character",
                         "mention_text": "Han Li",
-                        "evidence_text": "Han Li entered",
+                        "evidence_text": "Han Li",
                         "confidence": 0.96,
                     }
                 ],
@@ -519,7 +437,7 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
             force_reanalyze=True,
         )
 
-        self.assertEqual(provider.call_count, 8)
+        self.assertEqual(provider.call_count, 4)
         self.assertEqual(second_result.cached_chunks, 0)
 
     async def test_cached_result_is_saved_into_new_run(self):
@@ -531,10 +449,10 @@ class TestNarrativeAnalysis(unittest.IsolatedAsyncioTestCase):
             {
                 "mentions": [
                     {
-                        "mention_type": "location",
-                        "mention_text": "valley",
-                        "evidence_text": "the valley",
-                        "confidence": 0.8,
+                        "mention_type": "character",
+                        "mention_text": "Han Li",
+                        "evidence_text": "Han Li",
+                        "confidence": 0.95,
                     }
                 ],
             },

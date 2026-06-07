@@ -13,9 +13,6 @@ from backend.llm.mock_provider import (
     MockPayload,
     MockProvider,
 )
-from backend.llm.ollama_provider import (
-    OllamaProvider,
-)
 
 
 def create_llm_provider(
@@ -31,10 +28,10 @@ def create_llm_provider(
     根据应用配置创建对应的大模型 Provider。
 
     当前支持：
-    - ollama：本地 Ollama 模型
     - mock：固定测试结果
+    - deepseek/cloud_api：OpenAI-compatible API
 
-    cloud_api 只预留配置，尚未实现。
+    运行时只创建 mock 或 OpenAI-compatible API provider。
     """
 
     resolved_settings = (
@@ -42,11 +39,6 @@ def create_llm_provider(
         if settings is not None
         else get_llm_settings()
     )
-
-    if resolved_settings.provider == "ollama":
-        return OllamaProvider(
-            settings=resolved_settings
-        )
 
     if resolved_settings.provider == "mock":
         return MockProvider(
@@ -61,16 +53,6 @@ def create_llm_provider(
 
         return CloudAPIProvider(
             settings=resolved_settings
-        )
-
-    if (
-        resolved_settings.provider
-        == "cloud_api"
-    ):
-        raise ConfigurationError(
-            "LLM_PROVIDER 已设置为 cloud_api，"
-            "但 CloudAPIProvider 尚未实现。"
-            "当前请使用 ollama 或 mock。"
         )
 
     # 理论上 config.py 已经拦截未知值，

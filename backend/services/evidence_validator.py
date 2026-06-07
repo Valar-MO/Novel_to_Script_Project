@@ -6,8 +6,6 @@ from pydantic import BaseModel
 EVIDENCE_COLLECTION_FIELDS = (
     "mentions",
     "relations",
-    "event_frames",
-    "character_candidates",
 )
 
 

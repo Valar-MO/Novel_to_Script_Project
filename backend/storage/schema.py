@@ -2,7 +2,7 @@
 import sqlite3
 
 
-DATABASE_SCHEMA_VERSION = 8
+DATABASE_SCHEMA_VERSION = 10
 
 
 SCHEMA_SQL = """
@@ -385,6 +385,8 @@ CREATE TABLE IF NOT EXISTS project_characters (
     source_candidate_ids_json TEXT NOT NULL,
 
     evidence_count INTEGER NOT NULL DEFAULT 0,
+    is_user_pinned INTEGER NOT NULL DEFAULT 0
+        CHECK (is_user_pinned IN (0, 1)),
     input_quality_json TEXT NOT NULL,
 
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -398,6 +400,23 @@ CREATE TABLE IF NOT EXISTS project_characters (
         ON DELETE CASCADE,
 
     UNIQUE (character_run_id, character_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS project_character_suppressions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    project_id TEXT NOT NULL,
+    character_id TEXT NOT NULL,
+    character_name TEXT NOT NULL DEFAULT '',
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (project_id)
+        REFERENCES projects(id)
+        ON DELETE CASCADE,
+
+    UNIQUE (project_id, character_id)
 );
 
 
@@ -465,6 +484,13 @@ CREATE INDEX IF NOT EXISTS idx_project_characters_run
     );
 
 
+CREATE INDEX IF NOT EXISTS idx_character_suppressions_project
+    ON project_character_suppressions (
+        project_id,
+        character_id
+    );
+
+
 CREATE INDEX IF NOT EXISTS idx_project_character_decisions_run
     ON project_character_merge_decisions (
         character_run_id
@@ -474,6 +500,58 @@ CREATE INDEX IF NOT EXISTS idx_project_character_decisions_run
 CREATE INDEX IF NOT EXISTS idx_project_character_gaps_run
     ON project_character_input_gaps (
         character_run_id
+    );
+
+
+CREATE TABLE IF NOT EXISTS project_relationships (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    project_id TEXT NOT NULL,
+
+    source_character_id TEXT NOT NULL,
+    source_character_name TEXT NOT NULL,
+
+    target_character_id TEXT NOT NULL,
+    target_character_name TEXT NOT NULL,
+
+    relation_label TEXT NOT NULL,
+    relation_description TEXT NOT NULL DEFAULT '',
+
+    source_type TEXT NOT NULL DEFAULT 'ai'
+        CHECK (source_type IN ('ai', 'user')),
+    is_user_edited INTEGER NOT NULL DEFAULT 0
+        CHECK (is_user_edited IN (0, 1)),
+
+    evidence_text TEXT NOT NULL DEFAULT '',
+    source_chunk_id TEXT,
+    start_offset INTEGER,
+    end_offset INTEGER,
+
+    evidence_count INTEGER NOT NULL DEFAULT 1
+        CHECK (evidence_count >= 0),
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (project_id)
+        REFERENCES projects(id)
+        ON DELETE CASCADE
+);
+
+
+CREATE INDEX IF NOT EXISTS idx_project_relationships_project
+    ON project_relationships (
+        project_id,
+        source_type,
+        updated_at
+    );
+
+
+CREATE INDEX IF NOT EXISTS idx_project_relationships_characters
+    ON project_relationships (
+        project_id,
+        source_character_id,
+        target_character_id
     );
 
 
@@ -701,6 +779,10 @@ def _migrate_if_needed(
         _migrate_to_v7(connection)
     if current < 8:
         _migrate_to_v8(connection)
+    if current < 9:
+        _migrate_to_v9(connection)
+    if current < 10:
+        _migrate_to_v10(connection)
 
 
 def _ensure_current_schema_integrity(
@@ -710,6 +792,8 @@ def _ensure_current_schema_integrity(
 
     _migrate_to_v7(connection)
     _migrate_to_v8(connection)
+    _migrate_to_v9(connection)
+    _migrate_to_v10(connection)
 
 
 def _get_schema_version(
@@ -1104,4 +1188,105 @@ def _migrate_to_v8(
         "script_generation_runs",
         "cancelled_at",
         "cancelled_at TEXT",
+    )
+
+
+def _migrate_to_v9(
+    connection: sqlite3.Connection,
+) -> None:
+    """v8 -> v9: add pinned characters and project relationships."""
+
+    existing_tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+
+    if "project_characters" in existing_tables:
+        _add_column_if_missing(
+            connection,
+            "project_characters",
+            "is_user_pinned",
+            (
+                "is_user_pinned INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (is_user_pinned IN (0, 1))"
+            ),
+        )
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS project_relationships (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL,
+            source_character_id TEXT NOT NULL,
+            source_character_name TEXT NOT NULL,
+            target_character_id TEXT NOT NULL,
+            target_character_name TEXT NOT NULL,
+            relation_label TEXT NOT NULL,
+            relation_description TEXT NOT NULL DEFAULT '',
+            source_type TEXT NOT NULL DEFAULT 'ai'
+                CHECK (source_type IN ('ai', 'user')),
+            is_user_edited INTEGER NOT NULL DEFAULT 0
+                CHECK (is_user_edited IN (0, 1)),
+            evidence_text TEXT NOT NULL DEFAULT '',
+            source_chunk_id TEXT,
+            start_offset INTEGER,
+            end_offset INTEGER,
+            evidence_count INTEGER NOT NULL DEFAULT 1
+                CHECK (evidence_count >= 0),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id)
+                REFERENCES projects(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_project_relationships_project
+            ON project_relationships (
+                project_id,
+                source_type,
+                updated_at
+            );
+
+        CREATE INDEX IF NOT EXISTS idx_project_relationships_characters
+            ON project_relationships (
+                project_id,
+                source_character_id,
+                target_character_id
+            );
+        """
+    )
+
+
+
+def _migrate_to_v10(
+    connection: sqlite3.Connection,
+) -> None:
+    """v9 -> v10: add project-level hidden character records."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS project_character_suppressions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            project_id TEXT NOT NULL,
+            character_id TEXT NOT NULL,
+            character_name TEXT NOT NULL DEFAULT '',
+
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+            FOREIGN KEY (project_id)
+                REFERENCES projects(id)
+                ON DELETE CASCADE,
+
+            UNIQUE (project_id, character_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_character_suppressions_project
+            ON project_character_suppressions (
+                project_id,
+                character_id
+            );
+        """
     )

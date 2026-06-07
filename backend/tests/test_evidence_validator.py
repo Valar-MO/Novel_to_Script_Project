@@ -1,7 +1,6 @@
 import unittest
 
 from backend.llm.schemas import (
-    EventFrameExtractionOutput,
     MentionExtractionOutput,
     RelationExtractionOutput,
 )
@@ -9,47 +8,8 @@ from backend.services.evidence_validator import validate_evidence
 
 
 class TestEvidenceValidator(unittest.TestCase):
-    def test_event_frame_output_accepts_common_root_aliases(self):
-        payload = {
-            "events": [
-                {
-                    "trigger_text": "walked",
-                    "event_type": "movement",
-                    "arguments": [
-                        {
-                            "role": "actor",
-                            "mention_id": "chunk_0001_m_001",
-                            "mention_text": "Han Li",
-                        }
-                    ],
-                    "evidence_text": "Han Li walked",
-                    "confidence": 0.9,
-                }
-            ]
-        }
-
-        result = EventFrameExtractionOutput.model_validate(payload)
-
-        self.assertEqual(len(result.event_frames), 1)
-        self.assertEqual(result.event_frames[0].trigger_text, "walked")
-
-    def test_event_frame_output_accepts_single_event_alias(self):
-        payload = {
-            "event": {
-                "trigger_text": "walked",
-                "event_type": "movement",
-                "arguments": [],
-                "evidence_text": "Han Li walked",
-                "confidence": 0.9,
-            }
-        }
-
-        result = EventFrameExtractionOutput.model_validate(payload)
-
-        self.assertEqual(len(result.event_frames), 1)
-
     def test_marks_mention_evidence_with_offsets(self):
-        text = "Han Li walked into Seven Mysteries Sect."
+        text = "Han Li walked with Doctor Mo."
         extraction = MentionExtractionOutput(
             mentions=[
                 {
@@ -59,9 +19,9 @@ class TestEvidenceValidator(unittest.TestCase):
                     "confidence": 0.9,
                 },
                 {
-                    "mention_type": "organization",
-                    "mention_text": "Seven Mysteries Sect",
-                    "evidence_text": "Seven Mysteries Sect",
+                    "mention_type": "character",
+                    "mention_text": "Doctor Mo",
+                    "evidence_text": "Doctor Mo",
                     "confidence": 0.8,
                 },
             ],
@@ -85,7 +45,7 @@ class TestEvidenceValidator(unittest.TestCase):
                 second_mention["start_offset"]:
                 second_mention["end_offset"]
             ],
-            "Seven Mysteries Sect",
+            "Doctor Mo",
         )
 
     def test_marks_missing_mention_evidence_as_invalid(self):
@@ -140,43 +100,6 @@ class TestEvidenceValidator(unittest.TestCase):
             relation["end_offset"],
             len("Doctor Mo was Han Li's teacher"),
         )
-
-    def test_validates_event_frame_evidence(self):
-        text = "Han Li walked into Seven Mysteries Sect."
-        extraction = EventFrameExtractionOutput(
-            event_frames=[
-                {
-                    "trigger_text": "walked",
-                    "event_type": "movement",
-                    "arguments": [
-                        {
-                            "role": "actor",
-                            "mention_id": "chunk_0001_m_001",
-                            "mention_text": "Han Li",
-                        },
-                        {
-                            "role": "destination",
-                            "mention_id": "chunk_0001_m_002",
-                            "mention_text": "Seven Mysteries Sect",
-                        },
-                    ],
-                    "evidence_text": (
-                        "Han Li walked into Seven Mysteries Sect"
-                    ),
-                    "confidence": 0.9,
-                }
-            ],
-        )
-
-        result = validate_evidence(
-            target_text=text,
-            extraction=extraction,
-        )
-
-        event_frame = result["event_frames"][0]
-
-        self.assertTrue(event_frame["evidence_validated"])
-        self.assertEqual(event_frame["start_offset"], 0)
 
     def test_accepts_plain_dict_pipeline_result(self):
         result = validate_evidence(

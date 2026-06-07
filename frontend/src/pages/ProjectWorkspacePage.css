@@ -102,6 +102,384 @@
   background: rgba(255, 255, 255, 0.9);
 }
 
+.project-workspace-relationships {
+  margin-top: 18px;
+  border: 1px solid #dfe7f4;
+  border-radius: 12px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.project-workspace-relationship-summary {
+  display: grid;
+  margin-top: 12px;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.project-workspace-relationship-summary > div {
+  display: grid;
+  gap: 3px;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #f6f8fc;
+}
+
+.project-workspace-relationship-summary span {
+  color: #7e899c;
+  font-size: 11px;
+}
+
+.project-workspace-core-characters {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: 12px;
+  gap: 8px;
+}
+
+.project-workspace-core-character {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #dce3f1;
+  border-radius: 10px;
+  padding: 8px 12px;
+  background: #ffffff;
+  color: #172033;
+}
+
+.project-workspace-core-character.pinned {
+  border-color: #8aa3ff;
+  background: #eef3ff;
+}
+
+.project-workspace-relationship-progress {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 12px;
+  gap: 12px;
+  border-radius: 10px;
+  padding: 11px 13px;
+  background: #eef3ff;
+  color: #304f9d;
+}
+
+.project-workspace-relationship-progress strong {
+  font-size: 13px;
+}
+
+.project-workspace-relationship-progress span {
+  font-size: 12px;
+}
+
+.project-workspace-character-manager {
+  display: grid;
+  margin-top: 12px;
+  gap: 10px;
+  border: 1px solid #dfe6f2;
+  border-radius: 10px;
+  padding: 12px;
+  background: #f8faff;
+}
+
+.project-workspace-character-manager-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.project-workspace-character-manager-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.project-workspace-character-manager-heading span {
+  color: #71809a;
+  font-size: 12px;
+}
+
+.project-workspace-character-manager-list {
+  display: grid;
+  gap: 8px;
+}
+
+.project-workspace-character-manager-item {
+  display: grid;
+  align-items: center;
+  gap: 10px;
+  grid-template-columns:
+    auto
+    minmax(0, 1fr)
+    auto
+    auto;
+  border: 1px solid #e0e6f1;
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: #ffffff;
+}
+
+.project-workspace-character-manager-item input {
+  width: 16px;
+  height: 16px;
+  accent-color: #476bd9;
+}
+
+.project-workspace-character-manager-name {
+  display: grid;
+  gap: 3px;
+}
+
+.project-workspace-character-manager-name small {
+  color: #77849a;
+  font-size: 11px;
+}
+
+.project-workspace-character-manager-status {
+  color: #5870aa;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-workspace-character-delete-button {
+  border: 1px solid #e5b7b7;
+  border-radius: 7px;
+  padding: 6px 10px;
+  background: #ffffff;
+  color: #b83b3b;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-workspace-character-delete-button:hover {
+  background: #fff2f2;
+}
+
+.project-workspace-character-delete-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+
+.project-workspace-relationship-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  margin-bottom: 8px;
+}
+
+.project-workspace-relationship-list-heading span {
+  color: #7a879d;
+  font-size: 12px;
+}
+
+.project-workspace-relationship-list {
+  display: grid;
+  margin-top: 12px;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.project-workspace-relationship-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #dfe6f2;
+  border-radius: 10px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.project-workspace-relationship-card > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+.project-workspace-relationship-card span {
+  color: #6d7890;
+  font-size: 12px;
+}
+
+.project-workspace-relationship-card p {
+  margin: 0;
+  color: #3f4a5e;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.project-workspace-relationship-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-workspace-relationship-actions button,
+.project-workspace-relationship-editor button {
+  border: 1px solid #d9e0ed;
+  border-radius: 9px;
+  padding: 7px 10px;
+  background: #ffffff;
+  color: #30415f;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-workspace-relationship-expand {
+  display: flex;
+  justify-content: center;
+  margin-top: 14px;
+}
+
+.project-workspace-relationship-expand-button {
+  border: 1px solid #d5def0;
+  border-radius: 9px;
+  padding: 9px 18px;
+  background: #ffffff;
+  color: #4564ae;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.project-workspace-relationship-expand-button:hover {
+  border-color: #afbee1;
+  background: #f2f5fd;
+}
+
+.project-workspace-relationship-expand-button:active {
+  transform: translateY(1px);
+}
+
+.project-workspace-relationship-impact {
+  display: grid;
+  align-items: center;
+  margin-top: 16px;
+  gap: 12px;
+  grid-template-columns: auto minmax(0, 1fr);
+  border: 1px solid #cdd9f5;
+  border-radius: 12px;
+  padding: 13px 15px;
+  background: #f4f7ff;
+}
+
+.project-workspace-relationship-impact.empty {
+  border-color: #dde3ed;
+  background: #f8f9fc;
+}
+
+.project-workspace-relationship-impact-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #e3eaff;
+  color: #4569cf;
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.project-workspace-relationship-impact.empty
+.project-workspace-relationship-impact-icon {
+  background: #eceff5;
+  color: #7b879b;
+}
+
+.project-workspace-relationship-impact-content {
+  display: grid;
+  gap: 4px;
+}
+
+.project-workspace-relationship-impact-content strong {
+  color: #18233a;
+  font-size: 14px;
+}
+
+.project-workspace-relationship-impact-content p {
+  margin: 0;
+  color: #4e5e79;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.project-workspace-relationship-impact-content span {
+  color: #7b879b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.project-workspace-section-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.project-workspace-relationship-status {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #eef1f6;
+  color: #7a869a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.project-workspace-relationship-status.active {
+  background: #e8f5ed;
+  color: #34704a;
+}
+
+.project-workspace-relationship-editor {
+  display: grid;
+  margin-top: 12px;
+  gap: 10px;
+  border: 1px solid #dfe6f2;
+  border-radius: 10px;
+  padding: 12px;
+  background: #f9fbff;
+}
+
+.project-workspace-relationship-editor h4 {
+  margin: 0;
+}
+
+.project-workspace-relationship-editor label {
+  display: grid;
+  gap: 5px;
+  color: #52617b;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.project-workspace-relationship-editor input,
+.project-workspace-relationship-editor select,
+.project-workspace-relationship-editor textarea {
+  border: 1px solid #d8deea;
+  border-radius: 9px;
+  padding: 8px 10px;
+  background: #ffffff;
+  color: #172033;
+  font: inherit;
+  font-size: 13px;
+}
+
+.project-workspace-relationship-editor textarea {
+  resize: vertical;
+}
+
+.project-workspace-relationship-editor-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .project-workspace-script-controls {
   display: flex;
   flex-wrap: wrap;
@@ -584,8 +962,7 @@
   gap: 7px;
 }
 
-.project-workspace-script-meta span,
-.project-workspace-script-warnings span {
+.project-workspace-script-meta span {
   border-radius: 999px;
   padding: 6px 12px;
   background: #edf2ff;
@@ -660,17 +1037,6 @@
   line-height: 1.8;
 }
 
-.project-workspace-script-warnings {
-  display: flex;
-  flex-wrap: wrap;
-  margin-top: 12px;
-  gap: 7px;
-}
-
-.project-workspace-script-warnings span {
-  background: #fff7ed;
-  color: #9a5a16;
-}
 
 .project-workspace-layout {
   display: grid;
@@ -1091,6 +1457,24 @@
   }
 }
 
+@media (max-width: 700px) {
+  .project-workspace-character-manager-item {
+    grid-template-columns:
+      auto
+      minmax(0, 1fr)
+      auto;
+  }
+
+  .project-workspace-character-manager-status {
+    grid-column: 2;
+  }
+
+  .project-workspace-character-delete-button {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+}
+
 @media (max-width: 560px) {
   .project-workspace-title-row {
     align-items: flex-start;
@@ -1110,6 +1494,26 @@
   .project-workspace-analysis-summary {
     grid-template-columns:
       repeat(2, minmax(0, 1fr));
+  }
+
+  .project-workspace-relationship-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .project-workspace-relationship-impact {
+    align-items: flex-start;
+  }
+
+  .project-workspace-relationship-impact-content p {
+    font-size: 12px;
+  }
+
+  .project-workspace-character-manager-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .project-workspace-character-manager-status {
+    grid-column: 2;
   }
 
   .project-workspace-text {
