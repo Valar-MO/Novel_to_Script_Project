@@ -8,6 +8,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Response,
     UploadFile as FastAPIUploadFile,
     status,
 )
@@ -20,6 +21,7 @@ from backend.services.project_storage import (
     ProjectFileData,
     ProjectNotFoundError,
     append_project_files,
+    delete_project,
     get_project_chapter,
     get_project_chunk,
     get_project_summary,
@@ -763,6 +765,50 @@ def read_project(
         ) from error
 
     return ProjectDetailResponse.model_validate(project_data)
+
+
+@router.delete(
+    "/{project_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="删除小说项目",
+)
+def remove_project(
+    project_id: str,
+) -> Response:
+    normalized_project_id = project_id.strip()
+
+    if not normalized_project_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="project_id 不能为空。",
+        )
+
+    try:
+        delete_project(normalized_project_id)
+    except ProjectNotFoundError as error:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="项目不存在。",
+        ) from error
+    except ProjectBusyError as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(error),
+        ) from error
+    except ValueError as error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(error),
+        ) from error
+    except (sqlite3.Error, OSError) as error:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="删除项目失败，请稍后重新尝试。",
+        ) from error
+
+    return Response(
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
 
 
 @router.get(

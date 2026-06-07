@@ -12,6 +12,7 @@ import {
 import {
   ApiError,
   appendProjectFiles,
+  deleteProject,
   getProjectChunk,
   getProjectChapter,
   getProjectSummary,
@@ -44,6 +45,13 @@ import {
   getLatestProjectCharacters,
   updateProjectCharacterPin,
 } from "../api/projectCharacters";
+
+import {
+  buildScriptMarkdown,
+  buildScriptText,
+  downloadTextFile,
+  sanitizeFileName,
+} from "../utils/scriptExport";
 
 import "./ProjectWorkspacePage.css";
 
@@ -274,6 +282,7 @@ function ProjectWorkspacePage() {
   const [projectLoading, setProjectLoading] = useState(true);
   const [projectError, setProjectError] = useState("");
   const [projectNotFound, setProjectNotFound] = useState(false);
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
 
   const [expandedFileIds, setExpandedFileIds] = useState(
     new Set(),
@@ -311,6 +320,7 @@ function ProjectWorkspacePage() {
   const [regenerateInstruction, setRegenerateInstruction] = useState("");
   const [scriptModel, setScriptModel] = useState("deepseek-v4-pro");
   const [scriptThinkingEnabled, setScriptThinkingEnabled] = useState(false);
+  const [showScriptExportMenu, setShowScriptExportMenu] = useState(false);
   const [relationshipData, setRelationshipData] = useState(null);
   const [characterRun, setCharacterRun] = useState(null);
   const [relationshipError, setRelationshipError] = useState("");
@@ -1397,6 +1407,80 @@ function ProjectWorkspacePage() {
     }
   }
 
+  async function handleDeleteCurrentProject() {
+    const confirmed = window.confirm(
+      `确定删除项目“${project.project_name}”吗？`
+      + "\n\n小说原文、人物关系和已生成剧本都会被删除。"
+      + "\n此操作无法撤销。",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setIsDeletingProject(true);
+    setProjectError("");
+
+    try {
+      await deleteProject(projectId);
+
+      navigate("/projects", {
+        replace: true,
+      });
+    } catch (error) {
+      setProjectError(
+        getErrorMessage(
+          error,
+          "删除项目失败。",
+        ),
+      );
+
+      setIsDeletingProject(false);
+    }
+  }
+
+  function handleExportScript(format) {
+    if (scriptScenes.length === 0) {
+      setScriptError(
+        "当前没有可导出的剧本场景。",
+      );
+      return;
+    }
+
+    setScriptError("");
+    setShowScriptExportMenu(false);
+
+    const baseFileName = sanitizeFileName(
+      project?.project_name || "剧本",
+    );
+
+    if (format === "markdown") {
+      const content = buildScriptMarkdown(
+        project?.project_name,
+        scriptScenes,
+      );
+
+      downloadTextFile(
+        `${baseFileName}.md`,
+        content,
+        "text/markdown",
+      );
+
+      return;
+    }
+
+    const content = buildScriptText(
+      project?.project_name,
+      scriptScenes,
+    );
+
+    downloadTextFile(
+      `${baseFileName}.txt`,
+      content,
+      "text/plain",
+    );
+  }
+
   if (projectLoading) {
     return (
       <main className="project-workspace-state-page">
@@ -1562,9 +1646,20 @@ function ProjectWorkspacePage() {
             <h1>{project.project_name}</h1>
           </div>
 
-          <span className="project-workspace-status">
-            {getStatusLabel(project.status)}
-          </span>
+          <div className="project-workspace-header-actions">
+            <span className="project-workspace-status">
+              {getStatusLabel(project.status)}
+            </span>
+
+            <button
+              type="button"
+              className="project-workspace-danger-button"
+              disabled={isDeletingProject}
+              onClick={handleDeleteCurrentProject}
+            >
+              {isDeletingProject ? "正在删除…" : "删除项目"}
+            </button>
+          </div>
         </div>
 
         <div className="project-workspace-statistics">
@@ -1585,15 +1680,17 @@ function ProjectWorkspacePage() {
             </strong>
           </div>
         </div>
+      </header>
 
+      <section className="project-workspace-tools">
         <section className="project-workspace-relationships">
           <div className="project-workspace-analysis-heading">
-            <div>
+            <div className="project-workspace-analysis-heading-card">
               <strong>人物关系</strong>
               <span>生成可编辑的核心人物关系，供后续剧本生成参考</span>
             </div>
 
-            <div className="project-workspace-script-primary-actions">
+            <div className="project-workspace-analysis-actions">
               <button
                 type="button"
                 className="project-workspace-analysis-button"
@@ -2052,7 +2149,7 @@ function ProjectWorkspacePage() {
 
         <section className="project-workspace-script">
           <div className="project-workspace-analysis-heading">
-            <div>
+            <div className="project-workspace-analysis-heading-card">
               <div className="project-workspace-section-title-row">
                 <strong>剧本场景生成</strong>
 
@@ -2074,7 +2171,7 @@ function ProjectWorkspacePage() {
               </span>
             </div>
 
-            <div className="project-workspace-script-primary-actions">
+            <div className="project-workspace-analysis-actions">
               <button
                 type="button"
                 className="project-workspace-analysis-button"
@@ -2097,6 +2194,47 @@ function ProjectWorkspacePage() {
                   {isCancellingScript ? "正在取消……" : "取消生成"}
                 </button>
               )}
+
+              <div className="project-workspace-export-menu">
+                <button
+                  type="button"
+                  className="project-workspace-analysis-button secondary"
+                  disabled={scriptScenes.length === 0}
+                  onClick={() => {
+                    if (scriptScenes.length === 0) {
+                      setScriptError("当前没有可导出的剧本场景。");
+                      return;
+                    }
+
+                    setScriptError("");
+                    setShowScriptExportMenu((currentValue) => !currentValue);
+                  }}
+                >
+                  导出
+                </button>
+
+                {showScriptExportMenu && scriptScenes.length > 0 && (
+                  <div className="project-workspace-export-menu-panel">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleExportScript("text");
+                      }}
+                    >
+                      导出为 TXT
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        handleExportScript("markdown");
+                      }}
+                    >
+                      导出为 Markdown
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -2383,7 +2521,7 @@ function ProjectWorkspacePage() {
             </div>
           )}
         </section>
-      </header>
+      </section>
 
       <section className="project-workspace-layout">
         <aside className="project-workspace-sidebar">

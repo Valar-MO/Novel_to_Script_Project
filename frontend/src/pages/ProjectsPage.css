@@ -191,6 +191,23 @@
   font-size: 12px;
 }
 
+.projects-page-card-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.projects-page-card-actions button.danger {
+  border-color: #e2b4b4;
+  background: #ffffff;
+  color: #b33c3c;
+}
+
+.projects-page-card-actions button.danger:hover {
+  background: #fff2f2;
+}
+
 .projects-page-state {
   display: grid;
   min-height: 360px;

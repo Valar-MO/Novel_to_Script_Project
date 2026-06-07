@@ -172,6 +172,20 @@ export function getProjectSummary(
 }
 
 
+export function deleteProject(
+  projectId,
+  { signal } = {},
+) {
+  return requestJson(
+    `/api/projects/${encodeURIComponent(projectId)}`,
+    {
+      method: "DELETE",
+      signal,
+    },
+  );
+}
+
+
 export function getProjectChapter(
   projectId,
   chapterId,

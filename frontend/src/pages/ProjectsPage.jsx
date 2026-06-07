@@ -8,6 +8,7 @@ import {
 
 import {
   ApiError,
+  deleteProject,
   getProjects,
 } from "../api/projects";
 
@@ -72,6 +73,7 @@ function ProjectsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [reloadKey, setReloadKey] = useState(0);
+  const [deletingProjectId, setDeletingProjectId] = useState(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -109,6 +111,39 @@ function ProjectsPage() {
       controller.abort();
     };
   }, [reloadKey]);
+
+  async function handleDeleteProject(project) {
+    const confirmed = window.confirm(
+      `确定删除项目“${project.project_name}”吗？`
+      + "\n\n项目原文、人物关系和已生成剧本都会被删除。"
+      + "\n此操作无法撤销。",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingProjectId(project.project_id);
+    setErrorMessage("");
+
+    try {
+      await deleteProject(project.project_id);
+
+      setProjects((currentProjects) => (
+        currentProjects.filter(
+          (item) => (
+            item.project_id !== project.project_id
+          ),
+        )
+      ));
+    } catch (error) {
+      setErrorMessage(
+        getErrorMessage(error),
+      );
+    } finally {
+      setDeletingProjectId(null);
+    }
+  }
 
   return (
     <main className="projects-page">
@@ -230,16 +265,33 @@ function ProjectsPage() {
                         </strong>
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigate(
-                            `/project/${encodeURIComponent(project.project_id)}`,
-                          );
-                        }}
-                      >
-                        打开项目 →
-                      </button>
+                      <div className="projects-page-card-actions">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigate(
+                              `/project/${encodeURIComponent(project.project_id)}`,
+                            );
+                          }}
+                        >
+                          打开项目 →
+                        </button>
+
+                        <button
+                          type="button"
+                          className="danger"
+                          disabled={
+                            deletingProjectId === project.project_id
+                          }
+                          onClick={() => {
+                            handleDeleteProject(project);
+                          }}
+                        >
+                          {deletingProjectId === project.project_id
+                            ? "正在删除…"
+                            : "删除"}
+                        </button>
+                      </div>
                     </div>
                   </article>
                 ))}
