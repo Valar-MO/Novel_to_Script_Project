@@ -2,7 +2,7 @@
 import sqlite3
 
 
-DATABASE_SCHEMA_VERSION = 4
+DATABASE_SCHEMA_VERSION = 5
 
 
 SCHEMA_SQL = """
@@ -172,8 +172,23 @@ CREATE TABLE IF NOT EXISTS narrative_analysis_runs (
     prompt_version TEXT NOT NULL,
     schema_version TEXT NOT NULL,
 
-    status TEXT NOT NULL DEFAULT 'running',
+    status TEXT NOT NULL DEFAULT 'queued',
     error_message TEXT,
+
+    total_chunks INTEGER NOT NULL DEFAULT 0,
+    processed_chunks INTEGER NOT NULL DEFAULT 0,
+    successful_chunks INTEGER NOT NULL DEFAULT 0,
+    partial_chunks INTEGER NOT NULL DEFAULT 0,
+    failed_chunks INTEGER NOT NULL DEFAULT 0,
+    cached_chunks INTEGER NOT NULL DEFAULT 0,
+    cached_layers INTEGER NOT NULL DEFAULT 0,
+
+    current_chunk_id TEXT,
+    request_json TEXT,
+
+    started_at TEXT,
+    finished_at TEXT,
+    heartbeat_at TEXT,
 
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -211,6 +226,10 @@ CREATE TABLE IF NOT EXISTS narrative_unit_analyses (
     result_json TEXT,
     validated_result_json TEXT,
     error_message TEXT,
+
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_started_at TEXT,
+    last_finished_at TEXT,
 
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -313,6 +332,13 @@ CREATE INDEX IF NOT EXISTS idx_narrative_units_project_hash
         project_id,
         text_hash
     );
+
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_analysis_per_project
+    ON narrative_analysis_runs (
+        project_id
+    )
+    WHERE status IN ('queued', 'running');
 """
 
 
@@ -345,6 +371,8 @@ def _migrate_if_needed(
         _migrate_to_v3(connection)
     if current < 4:
         _migrate_to_v4(connection)
+    if current < 5:
+        _migrate_to_v5(connection)
 
 
 def _get_schema_version(
@@ -490,3 +518,79 @@ def _migrate_to_v4(
             )
             """
         )
+
+
+def _add_column_if_missing(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_sql: str,
+) -> None:
+    if column_name in _table_columns(connection, table_name):
+        return
+
+    connection.execute(
+        f"ALTER TABLE {table_name} ADD COLUMN {column_sql}"
+    )
+
+
+def _migrate_to_v5(
+    connection: sqlite3.Connection,
+) -> None:
+    """v4 → v5: add async job progress fields and active-run lock."""
+
+    existing_tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+
+    if "narrative_analysis_runs" in existing_tables:
+        run_columns = {
+            "total_chunks": "total_chunks INTEGER NOT NULL DEFAULT 0",
+            "processed_chunks": "processed_chunks INTEGER NOT NULL DEFAULT 0",
+            "successful_chunks": "successful_chunks INTEGER NOT NULL DEFAULT 0",
+            "partial_chunks": "partial_chunks INTEGER NOT NULL DEFAULT 0",
+            "failed_chunks": "failed_chunks INTEGER NOT NULL DEFAULT 0",
+            "cached_chunks": "cached_chunks INTEGER NOT NULL DEFAULT 0",
+            "cached_layers": "cached_layers INTEGER NOT NULL DEFAULT 0",
+            "current_chunk_id": "current_chunk_id TEXT",
+            "request_json": "request_json TEXT",
+            "started_at": "started_at TEXT",
+            "finished_at": "finished_at TEXT",
+            "heartbeat_at": "heartbeat_at TEXT",
+        }
+
+        for column_name, column_sql in run_columns.items():
+            _add_column_if_missing(
+                connection,
+                "narrative_analysis_runs",
+                column_name,
+                column_sql,
+            )
+
+    if "narrative_unit_analyses" in existing_tables:
+        unit_columns = {
+            "attempt_count": "attempt_count INTEGER NOT NULL DEFAULT 0",
+            "last_started_at": "last_started_at TEXT",
+            "last_finished_at": "last_finished_at TEXT",
+        }
+
+        for column_name, column_sql in unit_columns.items():
+            _add_column_if_missing(
+                connection,
+                "narrative_unit_analyses",
+                column_name,
+                column_sql,
+            )
+
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_analysis_per_project
+        ON narrative_analysis_runs (
+            project_id
+        )
+        WHERE status IN ('queued', 'running')
+        """
+    )

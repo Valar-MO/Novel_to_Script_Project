@@ -190,6 +190,7 @@ class MockProvider(LLMProvider):
         ],
         response_model: type[ResponseModelT],
         temperature: float | None = None,
+        metadata: object | None = None,
     ) -> ResponseModelT:
         """
         返回预先配置且经过 Pydantic 校验的结构化结果。

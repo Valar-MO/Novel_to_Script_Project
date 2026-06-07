@@ -1,15 +1,28 @@
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.narrative_analysis import router as narrative_analysis_router
 from backend.api.projects import router as projects_router
+from backend.services.analysis_job_runner import analysis_job_runner
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await analysis_job_runner.start()
+    try:
+        yield
+    finally:
+        await analysis_job_runner.stop()
 
 
 app = FastAPI(
     title="Novel2Script API",
     description="Novel2Script 小说转剧本系统后端接口",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # 本地开发环境允许访问后端的前端地址。
