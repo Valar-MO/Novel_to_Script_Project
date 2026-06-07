@@ -18,8 +18,8 @@ function HomePage() {
           <h2>让小说改编成结构化影视剧本</h2>
 
           <p className="description">
-            上传或输入小说文本，系统将完成人物提取、场景划分、
-            场景卡生成和影视剧本改写。
+            上传小说文本，系统将自动整理长文本、分析人物关系，
+            并生成可编辑、可导出的结构化影视剧本。
           </p>
 
           <div className="hero-actions">
@@ -47,22 +47,22 @@ function HomePage() {
           <div className="workflow-list">
             <div className="workflow-item">
               <span>01</span>
-              <p>输入小说</p>
+              <p>上传小说</p>
             </div>
 
             <div className="workflow-item">
               <span>02</span>
-              <p>分析故事</p>
+              <p>分析人物关系</p>
             </div>
 
             <div className="workflow-item">
               <span>03</span>
-              <p>划分场景</p>
+              <p>生成剧本场景</p>
             </div>
 
             <div className="workflow-item">
               <span>04</span>
-              <p>生成剧本</p>
+              <p>编辑与导出</p>
             </div>
           </div>
         </section>

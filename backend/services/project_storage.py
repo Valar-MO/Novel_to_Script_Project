@@ -765,6 +765,111 @@ def append_project_files(
 
 
 
+def delete_project(
+    project_id: str,
+    *,
+    database_path: DatabasePath | None = None,
+    projects_directory: str | Path | None = None,
+) -> None:
+    normalized_project_id = project_id.strip()
+
+    if not normalized_project_id:
+        raise ValueError("project_id 不能为空。")
+
+    project_directory = _project_directory(
+        projects_directory=projects_directory,
+        project_id=normalized_project_id,
+    )
+
+    deleting_directory = (
+        project_directory.parent
+        / (
+            f".deleting-{normalized_project_id}-"
+            f"{uuid.uuid4().hex}"
+        )
+    )
+
+    with database_session(
+        database_path=database_path,
+    ) as connection:
+        create_schema(connection)
+
+        project_row = connection.execute(
+            """
+            SELECT id
+            FROM projects
+            WHERE id = ?
+            """,
+            (normalized_project_id,),
+        ).fetchone()
+
+        if project_row is None:
+            raise ProjectNotFoundError(
+                f"项目不存在：{normalized_project_id}"
+            )
+
+        busy_row = connection.execute(
+            """
+            SELECT 1
+            FROM narrative_analysis_runs
+            WHERE project_id = ?
+              AND status IN ('queued', 'running')
+            UNION ALL
+            SELECT 1
+            FROM script_generation_runs
+            WHERE project_id = ?
+              AND status IN ('queued', 'running')
+            LIMIT 1
+            """,
+            (
+                normalized_project_id,
+                normalized_project_id,
+            ),
+        ).fetchone()
+
+        if busy_row is not None:
+            raise ProjectBusyError(
+                "项目当前存在运行中的任务，暂时不能删除。"
+            )
+
+    if project_directory.exists():
+        project_directory.replace(deleting_directory)
+
+    try:
+        with database_session(
+            database_path=database_path,
+        ) as connection:
+            create_schema(connection)
+
+            cursor = connection.execute(
+                """
+                DELETE FROM projects
+                WHERE id = ?
+                """,
+                (normalized_project_id,),
+            )
+
+            if cursor.rowcount == 0:
+                raise ProjectNotFoundError(
+                    f"项目不存在：{normalized_project_id}"
+                )
+
+    except Exception:
+        if (
+            deleting_directory.exists()
+            and not project_directory.exists()
+        ):
+            deleting_directory.replace(project_directory)
+
+        raise
+
+    shutil.rmtree(
+        deleting_directory,
+        ignore_errors=True,
+    )
+
+
+
 def list_projects(
     *,
     database_path: DatabasePath | None = None,

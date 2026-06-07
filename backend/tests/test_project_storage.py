@@ -12,6 +12,7 @@ from backend.services.project_storage import (
     ProjectFileData,
     ProjectNotFoundError,
     append_project_files,
+    delete_project,
     get_project_chapter,
     get_project_chunk,
     get_project_summary,
@@ -218,6 +219,38 @@ class TestProjectStorage(unittest.TestCase):
             [item["file_order"] for item in project["files"]],
             [1, 2],
         )
+
+    def test_delete_project_removes_database_and_files(
+        self,
+    ):
+        saved = save_project(
+            project_name="Delete Test",
+            files=[self._build_valid_file_data()],
+            database_path=self.database_path,
+            projects_directory=self.projects_directory,
+        )
+
+        self.assertTrue(
+            saved.project_directory.exists()
+        )
+
+        delete_project(
+            saved.project_id,
+            database_path=self.database_path,
+            projects_directory=self.projects_directory,
+        )
+
+        self.assertFalse(
+            saved.project_directory.exists()
+        )
+
+        with self.assertRaises(
+            ProjectNotFoundError
+        ):
+            get_project_summary(
+                saved.project_id,
+                database_path=self.database_path,
+            )
 
     def test_append_project_files_rejects_busy_project(self):
         file_data = self._build_valid_file_data()
