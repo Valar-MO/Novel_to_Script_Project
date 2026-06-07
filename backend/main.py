@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.narrative_analysis import router as narrative_analysis_router
+from backend.api.project_characters import router as project_characters_router
 from backend.api.projects import router as projects_router
 from backend.services.analysis_job_runner import analysis_job_runner
 
@@ -42,6 +43,7 @@ app.add_middleware(
 
 app.include_router(projects_router)
 app.include_router(narrative_analysis_router)
+app.include_router(project_characters_router)
 
 
 @app.get("/api/health", tags=["system"])
