@@ -2,7 +2,7 @@
 import sqlite3
 
 
-DATABASE_SCHEMA_VERSION = 5
+DATABASE_SCHEMA_VERSION = 6
 
 
 SCHEMA_SQL = """
@@ -339,6 +339,142 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_analysis_per_project
         project_id
     )
     WHERE status IN ('queued', 'running');
+
+
+CREATE TABLE IF NOT EXISTS project_character_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    project_id TEXT NOT NULL,
+    narrative_run_id INTEGER NOT NULL,
+
+    status TEXT NOT NULL,
+    error_message TEXT,
+
+    total_units INTEGER NOT NULL DEFAULT 0,
+    used_units INTEGER NOT NULL DEFAULT 0,
+    skipped_units INTEGER NOT NULL DEFAULT 0,
+    total_candidates INTEGER NOT NULL DEFAULT 0,
+    merged_characters INTEGER NOT NULL DEFAULT 0,
+    ambiguous_pairs INTEGER NOT NULL DEFAULT 0,
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (project_id)
+        REFERENCES projects(id)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (narrative_run_id)
+        REFERENCES narrative_analysis_runs(id)
+        ON DELETE CASCADE
+);
+
+
+CREATE TABLE IF NOT EXISTS project_characters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    character_run_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+
+    character_id TEXT NOT NULL,
+    canonical_name TEXT NOT NULL,
+
+    aliases_json TEXT NOT NULL,
+    references_json TEXT NOT NULL,
+    mention_ids_json TEXT NOT NULL,
+    source_candidate_ids_json TEXT NOT NULL,
+
+    evidence_count INTEGER NOT NULL DEFAULT 0,
+    input_quality_json TEXT NOT NULL,
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (character_run_id)
+        REFERENCES project_character_runs(id)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (project_id)
+        REFERENCES projects(id)
+        ON DELETE CASCADE,
+
+    UNIQUE (character_run_id, character_id)
+);
+
+
+CREATE TABLE IF NOT EXISTS project_character_merge_decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    character_run_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+
+    left_candidate_id TEXT NOT NULL,
+    right_candidate_id TEXT NOT NULL,
+
+    decision TEXT NOT NULL,
+    merge_score REAL NOT NULL DEFAULT 0,
+
+    evidence_json TEXT NOT NULL,
+    conflicts_json TEXT NOT NULL,
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (character_run_id)
+        REFERENCES project_character_runs(id)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (project_id)
+        REFERENCES projects(id)
+        ON DELETE CASCADE
+);
+
+
+CREATE TABLE IF NOT EXISTS project_character_input_gaps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    character_run_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+
+    source_unit_id INTEGER,
+    chunk_id TEXT,
+    unit_status TEXT,
+    layer_name TEXT,
+    reason TEXT NOT NULL,
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    FOREIGN KEY (character_run_id)
+        REFERENCES project_character_runs(id)
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (project_id)
+        REFERENCES projects(id)
+        ON DELETE CASCADE
+);
+
+
+CREATE INDEX IF NOT EXISTS idx_project_character_runs_project_created
+    ON project_character_runs (
+        project_id,
+        created_at
+    );
+
+
+CREATE INDEX IF NOT EXISTS idx_project_characters_run
+    ON project_characters (
+        character_run_id
+    );
+
+
+CREATE INDEX IF NOT EXISTS idx_project_character_decisions_run
+    ON project_character_merge_decisions (
+        character_run_id
+    );
+
+
+CREATE INDEX IF NOT EXISTS idx_project_character_gaps_run
+    ON project_character_input_gaps (
+        character_run_id
+    );
 """
 
 
@@ -373,6 +509,8 @@ def _migrate_if_needed(
         _migrate_to_v4(connection)
     if current < 5:
         _migrate_to_v5(connection)
+    if current < 6:
+        _migrate_to_v6(connection)
 
 
 def _get_schema_version(
@@ -592,5 +730,108 @@ def _migrate_to_v5(
             project_id
         )
         WHERE status IN ('queued', 'running')
+        """
+    )
+
+
+def _migrate_to_v6(
+    connection: sqlite3.Connection,
+) -> None:
+    """v5 -> v6: add project-level character table build artifacts."""
+
+    connection.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS project_character_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id TEXT NOT NULL,
+            narrative_run_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            total_units INTEGER NOT NULL DEFAULT 0,
+            used_units INTEGER NOT NULL DEFAULT 0,
+            skipped_units INTEGER NOT NULL DEFAULT 0,
+            total_candidates INTEGER NOT NULL DEFAULT 0,
+            merged_characters INTEGER NOT NULL DEFAULT 0,
+            ambiguous_pairs INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (project_id)
+                REFERENCES projects(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (narrative_run_id)
+                REFERENCES narrative_analysis_runs(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS project_characters (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_run_id INTEGER NOT NULL,
+            project_id TEXT NOT NULL,
+            character_id TEXT NOT NULL,
+            canonical_name TEXT NOT NULL,
+            aliases_json TEXT NOT NULL,
+            references_json TEXT NOT NULL,
+            mention_ids_json TEXT NOT NULL,
+            source_candidate_ids_json TEXT NOT NULL,
+            evidence_count INTEGER NOT NULL DEFAULT 0,
+            input_quality_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (character_run_id)
+                REFERENCES project_character_runs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (project_id)
+                REFERENCES projects(id)
+                ON DELETE CASCADE,
+            UNIQUE (character_run_id, character_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS project_character_merge_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_run_id INTEGER NOT NULL,
+            project_id TEXT NOT NULL,
+            left_candidate_id TEXT NOT NULL,
+            right_candidate_id TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            merge_score REAL NOT NULL DEFAULT 0,
+            evidence_json TEXT NOT NULL,
+            conflicts_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (character_run_id)
+                REFERENCES project_character_runs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (project_id)
+                REFERENCES projects(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS project_character_input_gaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_run_id INTEGER NOT NULL,
+            project_id TEXT NOT NULL,
+            source_unit_id INTEGER,
+            chunk_id TEXT,
+            unit_status TEXT,
+            layer_name TEXT,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (character_run_id)
+                REFERENCES project_character_runs(id)
+                ON DELETE CASCADE,
+            FOREIGN KEY (project_id)
+                REFERENCES projects(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_project_character_runs_project_created
+            ON project_character_runs (project_id, created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_project_characters_run
+            ON project_characters (character_run_id);
+
+        CREATE INDEX IF NOT EXISTS idx_project_character_decisions_run
+            ON project_character_merge_decisions (character_run_id);
+
+        CREATE INDEX IF NOT EXISTS idx_project_character_gaps_run
+            ON project_character_input_gaps (character_run_id);
         """
     )
