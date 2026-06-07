@@ -18,6 +18,10 @@ async function readErrorMessage(response, fallbackMessage) {
         .map((item) => item.msg || fallbackMessage)
         .join("；");
     }
+
+    if (body?.detail && typeof body.detail === "object") {
+      return body.detail.message || fallbackMessage;
+    }
   } catch {
     return fallbackMessage;
   }
@@ -71,10 +75,19 @@ export async function startNarrativeAnalysis(
 
 export async function getNarrativeAnalysisRun(
   runId,
-  { signal } = {},
+  {
+    includeUnits = true,
+    signal,
+  } = {},
 ) {
+  const query = new URLSearchParams({
+    include_units: includeUnits ? "true" : "false",
+  });
   const response = await fetch(
-    `${API_BASE_URL}/api/narrative-analysis/${encodeURIComponent(runId)}`,
+    (
+      `${API_BASE_URL}/api/narrative-analysis/`
+      + `${encodeURIComponent(runId)}?${query.toString()}`
+    ),
     {
       signal,
     },
@@ -85,6 +98,89 @@ export async function getNarrativeAnalysisRun(
       await readErrorMessage(
         response,
         "读取 AI 分析结果失败。",
+      ),
+    );
+  }
+
+  return response.json();
+}
+
+
+export async function getActiveNarrativeAnalysisRun(
+  projectId,
+  { signal } = {},
+) {
+  const response = await fetch(
+    (
+      `${API_BASE_URL}/api/projects/`
+      + `${encodeURIComponent(projectId)}/narrative-analysis/active`
+    ),
+    {
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(
+        response,
+        "读取当前 AI 分析任务失败。",
+      ),
+    );
+  }
+
+  return response.json();
+}
+
+
+export async function resumeNarrativeAnalysis(
+  runId,
+  { signal } = {},
+) {
+  const response = await fetch(
+    (
+      `${API_BASE_URL}/api/narrative-analysis/`
+      + `${encodeURIComponent(runId)}/resume`
+    ),
+    {
+      method: "POST",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(
+        response,
+        "继续 AI 分析失败。",
+      ),
+    );
+  }
+
+  return response.json();
+}
+
+
+export async function retryFailedNarrativeAnalysis(
+  runId,
+  { signal } = {},
+) {
+  const response = await fetch(
+    (
+      `${API_BASE_URL}/api/narrative-analysis/`
+      + `${encodeURIComponent(runId)}/retry-failed`
+    ),
+    {
+      method: "POST",
+      signal,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      await readErrorMessage(
+        response,
+        "重试失败文本块失败。",
       ),
     );
   }

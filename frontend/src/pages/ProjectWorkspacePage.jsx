@@ -1,4 +1,4 @@
-import {
+﻿import {
   useEffect,
   useMemo,
   useRef,
@@ -15,11 +15,27 @@ import {
   getProjectSummary,
 } from "../api/projects";
 import {
+  getActiveNarrativeAnalysisRun,
   getNarrativeAnalysisRun,
+  resumeNarrativeAnalysis,
+  retryFailedNarrativeAnalysis,
   startNarrativeAnalysis,
 } from "../api/narrativeAnalysis";
 
 import "./ProjectWorkspacePage.css";
+
+
+const ANALYSIS_TERMINAL_STATUSES = new Set([
+  "completed",
+  "partial",
+  "failed",
+  "interrupted",
+]);
+
+const ANALYSIS_ACTIVE_STATUSES = new Set([
+  "queued",
+  "running",
+]);
 
 
 function formatBytes(sizeBytes) {
@@ -335,6 +351,119 @@ function ProjectWorkspacePage() {
   ]);
 
   useEffect(() => {
+    if (projectLoading || projectError) {
+      return undefined;
+    }
+
+    const controller = new AbortController();
+
+    getActiveNarrativeAnalysisRun(projectId, {
+      signal: controller.signal,
+    })
+      .then((activeRun) => {
+        if (activeRun) {
+          setAnalysisResult(activeRun);
+        }
+      })
+      .catch((error) => {
+        if (
+          error instanceof DOMException
+          && error.name === "AbortError"
+        ) {
+          return;
+        }
+
+        setAnalysisError(
+          getErrorMessage(
+            error,
+            "读取当前 AI 分析任务失败。",
+          ),
+        );
+      });
+
+    return () => {
+      controller.abort();
+    };
+  }, [
+    projectId,
+    projectLoading,
+    projectError,
+  ]);
+
+  useEffect(() => {
+    const runId = analysisResult?.id || analysisResult?.run_id;
+
+    if (!runId || !ANALYSIS_ACTIVE_STATUSES.has(analysisResult.status)) {
+      return undefined;
+    }
+
+    let timeoutId = null;
+    const controller = new AbortController();
+
+    async function pollRun() {
+      try {
+        const runDetail = await getNarrativeAnalysisRun(
+          runId,
+          {
+            includeUnits: false,
+            signal: controller.signal,
+          },
+        );
+
+        if (ANALYSIS_TERMINAL_STATUSES.has(runDetail.status)) {
+          const runWithUnits = await getNarrativeAnalysisRun(
+            runId,
+            {
+              includeUnits: true,
+              signal: controller.signal,
+            },
+          );
+          setAnalysisResult(runWithUnits);
+          setIsAnalyzing(false);
+          return;
+        }
+
+        setAnalysisResult((current) => ({
+          ...(current || {}),
+          ...runDetail,
+          units: current?.units || [],
+        }));
+        setIsAnalyzing(true);
+        timeoutId = window.setTimeout(pollRun, 2500);
+      } catch (error) {
+        if (
+          error instanceof DOMException
+          && error.name === "AbortError"
+        ) {
+          return;
+        }
+
+        setIsAnalyzing(false);
+        setAnalysisError(
+          getErrorMessage(
+            error,
+            "刷新 AI 分析进度失败。",
+          ),
+        );
+      }
+    }
+
+    timeoutId = window.setTimeout(pollRun, 800);
+
+    return () => {
+      controller.abort();
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [
+    analysisResult?.id,
+    analysisResult?.run_id,
+    analysisResult?.status,
+  ]);
+
+  useEffect(() => {
     if (!highlightedEvidenceRef.current) {
       return;
     }
@@ -420,24 +549,80 @@ function ProjectWorkspacePage() {
       const result = await startNarrativeAnalysis(
         projectId,
         {
-          maxChunks: 1,
+          maxChunks: null,
           forceReanalyze: false,
         },
       );
 
-      const runDetail = await getNarrativeAnalysisRun(
-        result.run_id,
-      );
-
-      setAnalysisResult(runDetail);
+      setAnalysisResult({
+        id: result.run_id,
+        ...result,
+        units: [],
+      });
     } catch (error) {
       setAnalysisError(
         error instanceof Error
           ? error.message
-          : "AI 分析失败。",
+          : "AI analysis failed.",
       );
-    } finally {
+    }
+  }
+
+  async function handleResumeAnalysis() {
+    const runId = analysisResult?.id || analysisResult?.run_id;
+
+    if (!runId) {
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setAnalysisError("");
+
+    try {
+      const result = await resumeNarrativeAnalysis(runId);
+
+      setAnalysisResult({
+        id: result.run_id,
+        ...result,
+        units: analysisResult?.units || [],
+      });
+    } catch (error) {
       setIsAnalyzing(false);
+      setAnalysisError(
+        getErrorMessage(
+          error,
+          "继续 AI 分析失败。",
+        ),
+      );
+    }
+  }
+
+  async function handleRetryFailedAnalysis() {
+    const runId = analysisResult?.id || analysisResult?.run_id;
+
+    if (!runId) {
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setAnalysisError("");
+
+    try {
+      const result = await retryFailedNarrativeAnalysis(runId);
+
+      setAnalysisResult({
+        id: result.run_id,
+        ...result,
+        units: analysisResult?.units || [],
+      });
+    } catch (error) {
+      setIsAnalyzing(false);
+      setAnalysisError(
+        getErrorMessage(
+          error,
+          "重试失败文本块失败。",
+        ),
+      );
     }
   }
 
@@ -446,7 +631,7 @@ function ProjectWorkspacePage() {
       <main className="project-workspace-state-page">
         <div className="project-workspace-loader" />
         <h1>正在加载项目</h1>
-        <p>正在从数据库读取项目摘要……</p>
+        <p>正在从数据库读取项目摘要...</p>
       </main>
     );
   }
@@ -460,7 +645,7 @@ function ProjectWorkspacePage() {
 
         <h1>
           {projectNotFound
-            ? "项目不存在"
+            ? "Project not found"
             : "项目加载失败"}
         </h1>
 
@@ -518,7 +703,7 @@ function ProjectWorkspacePage() {
             type="button"
             onClick={() => navigate("/project/new")}
           >
-            ＋ 新建项目
+            + 新建项目
           </button>
         </div>
 
@@ -556,7 +741,7 @@ function ProjectWorkspacePage() {
           <div className="project-workspace-analysis-heading">
             <div>
               <strong>AI 叙事分析</strong>
-              <span>开发阶段默认只分析 1 个文本块</span>
+              <span>按当前项目的全部文本块串行分析</span>
             </div>
 
             <button
@@ -566,9 +751,31 @@ function ProjectWorkspacePage() {
               onClick={handleStartAnalysis}
             >
               {isAnalyzing
-                ? "正在分析……"
+                ? "Analysis running..."
                 : "开始 AI 分析"}
             </button>
+
+            {analysisResult?.status === "interrupted" && (
+              <button
+                type="button"
+                className="project-workspace-analysis-button"
+                disabled={isAnalyzing}
+                onClick={handleResumeAnalysis}
+              >
+                继续分析
+              </button>
+            )}
+
+            {(analysisResult?.failed_chunks ?? 0) > 0 && (
+              <button
+                type="button"
+                className="project-workspace-analysis-button"
+                disabled={isAnalyzing}
+                onClick={handleRetryFailedAnalysis}
+              >
+                重试失败文本块
+              </button>
+            )}
           </div>
 
           {analysisError && (
@@ -588,32 +795,28 @@ function ProjectWorkspacePage() {
                 <span>批次</span>
                 <strong>{analysisResult.id}</strong>
               </div>
-
               <div>
-                <span>文本块</span>
-                <strong>{analysisResult.units?.length ?? 0}</strong>
+                <span>进度</span>
+                <strong>
+                  {analysisResult.processed_chunks ?? 0}
+                  {" / "}
+                  {analysisResult.total_chunks ?? 0}
+                </strong>
               </div>
 
               <div>
                 <span>成功</span>
-                <strong>
-                  {
-                    (analysisResult.units || []).filter(
-                      (unit) => unit.status === "completed",
-                    ).length
-                  }
-                </strong>
+                <strong>{analysisResult.successful_chunks ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>部分成功</span>
+                <strong>{analysisResult.partial_chunks ?? 0}</strong>
               </div>
 
               <div>
                 <span>失败</span>
-                <strong>
-                  {
-                    (analysisResult.units || []).filter(
-                      (unit) => unit.status === "failed",
-                    ).length
-                  }
-                </strong>
+                <strong>{analysisResult.failed_chunks ?? 0}</strong>
               </div>
 
               <div>
@@ -623,13 +826,12 @@ function ProjectWorkspacePage() {
 
               <div>
                 <span>缓存块</span>
-                <strong>
-                  {
-                    (analysisResult.units || []).filter(
-                      (unit) => unit.cache_hit,
-                    ).length
-                  }
-                </strong>
+                <strong>{analysisResult.cached_chunks ?? 0}</strong>
+              </div>
+
+              <div>
+                <span>当前文本块</span>
+                <strong>{analysisResult.current_chunk_id || "-"}</strong>
               </div>
             </div>
           )}
@@ -866,8 +1068,8 @@ function ProjectWorkspacePage() {
                               <strong>{mention.mention_text}</strong>
                               <small>
                                 {mention.evidence_validated === false
-                                  ? "证据未定位"
-                                  : "证据已定位"}
+                                  ? "Evidence not located"
+                                  : "Evidence located"}
                                 {" · "}
                                 置信度
                                 {" "}
@@ -919,7 +1121,7 @@ function ProjectWorkspacePage() {
                       onClick={() => toggleFile(file.id)}
                     >
                       <span className="project-workspace-chevron">
-                        {fileExpanded ? "▾" : "▸"}
+                        {fileExpanded ? "v" : ">"}
                       </span>
 
                       <span className="project-workspace-file-icon">
@@ -971,7 +1173,7 @@ function ProjectWorkspacePage() {
                                   字符
                                   {" · "}
                                   {chapter.is_detected
-                                    ? "章节已识别"
+                                    ? "Chapter detected"
                                     : "自动兜底"}
                                 </small>
                               </span>
@@ -999,7 +1201,7 @@ function ProjectWorkspacePage() {
                 字符
                 {" "}
                 {selectedChapter.start_character}
-                –
+                -
                 {selectedChapter.end_character}
               </span>
             )}
@@ -1030,7 +1232,7 @@ function ProjectWorkspacePage() {
                 type="button"
                 onClick={retryChapterLoad}
               >
-                重新加载
+                重试
               </button>
             </div>
           )}
@@ -1069,7 +1271,7 @@ function ProjectWorkspacePage() {
                     <span>识别状态</span>
                     <strong>
                       {selectedChapter.is_detected
-                        ? "章节标题已识别"
+                        ? "Chapter title detected"
                         : "使用文件范围兜底"}
                     </strong>
                   </div>
@@ -1078,7 +1280,7 @@ function ProjectWorkspacePage() {
                     <span>字符范围</span>
                     <strong>
                       {selectedChapter.start_character}
-                      –
+                      -
                       {selectedChapter.end_character}
                     </strong>
                   </div>

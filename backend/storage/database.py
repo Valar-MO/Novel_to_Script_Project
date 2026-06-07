@@ -128,6 +128,7 @@ def database_session(
     )
 
     try:
+        create_schema(connection)
         yield connection
         connection.commit()
     except Exception:

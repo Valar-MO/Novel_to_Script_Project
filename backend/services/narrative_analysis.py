@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Any, Sequence
@@ -46,6 +47,8 @@ RELATION_SCHEMA_VERSION = "relation_schema_v3"
 EVENT_FRAME_SCHEMA_VERSION = "event_frame_schema_v5"
 CHARACTER_CANDIDATE_SCHEMA_VERSION = "character_candidate_schema_v3"
 ANALYSIS_STATUS_RUNNING = "running"
+ANALYSIS_STATUS_QUEUED = "queued"
+ANALYSIS_STATUS_INTERRUPTED = "interrupted"
 ANALYSIS_STATUS_COMPLETED = "completed"
 ANALYSIS_STATUS_PARTIAL = "partial"
 ANALYSIS_STATUS_FAILED = "failed"
@@ -71,11 +74,18 @@ class NarrativeAnalysisResult:
     project_id: str
     status: str
     total_chunks: int
+    processed_chunks: int
     successful_chunks: int
     failed_chunks: int
     partial_chunks: int
     cached_chunks: int
     cached_layers: int
+
+
+class ActiveNarrativeAnalysisError(RuntimeError):
+    def __init__(self, active_run_id: int) -> None:
+        super().__init__("该项目已有分析任务正在执行。")
+        self.active_run_id = active_run_id
 
 
 def compute_text_hash(text: str) -> str:
@@ -288,11 +298,172 @@ def _load_project_chunks(
         ]
 
 
+def _get_active_run_id(
+    *,
+    connection: sqlite3.Connection,
+    project_id: str,
+) -> int | None:
+    row = connection.execute(
+        """
+        SELECT id
+        FROM narrative_analysis_runs
+        WHERE project_id = ?
+          AND status IN (?, ?)
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (
+            project_id,
+            ANALYSIS_STATUS_QUEUED,
+            ANALYSIS_STATUS_RUNNING,
+        ),
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    return int(row["id"])
+
+
+def _get_run_project_id(
+    *,
+    connection: sqlite3.Connection,
+    run_id: int,
+) -> str:
+    row = connection.execute(
+        """
+        SELECT project_id
+        FROM narrative_analysis_runs
+        WHERE id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+    if row is None:
+        raise LookupError(
+            f"Narrative analysis run does not exist: {run_id}"
+        )
+
+    return str(row["project_id"])
+
+
+def _get_pending_chunk_database_ids(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None,
+) -> set[int]:
+    with database_session(database_path=database_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT chunk_database_id
+            FROM narrative_unit_analyses
+            WHERE run_id = ?
+              AND status = 'pending'
+            ORDER BY id
+            """,
+            (run_id,),
+        ).fetchall()
+
+    return {
+        int(row["chunk_database_id"])
+        for row in rows
+    }
+
+
+def _get_run_request(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None,
+) -> tuple[str, dict[str, Any]]:
+    with database_session(database_path=database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT project_id, request_json
+            FROM narrative_analysis_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        if row is None:
+            raise LookupError(
+                f"Narrative analysis run does not exist: {run_id}"
+            )
+
+        raw_request = row["request_json"]
+
+    if raw_request:
+        parsed_request = json.loads(raw_request)
+        if isinstance(parsed_request, dict):
+            return str(row["project_id"]), parsed_request
+
+    return str(row["project_id"]), {}
+
+
+def _precreate_pending_units(
+    *,
+    connection: sqlite3.Connection,
+    run_id: int,
+    project_id: str,
+    chunks: Sequence[NarrativeChunk],
+    provider: LLMProvider,
+    previous_context_chars: int,
+    next_context_chars: int,
+) -> None:
+    for index, chunk in enumerate(chunks):
+        previous_context, next_context = _build_contexts(
+            chunks=chunks,
+            index=index,
+            previous_context_chars=previous_context_chars,
+            next_context_chars=next_context_chars,
+        )
+        analysis_input_hash = compute_analysis_input_hash(
+            previous_context=previous_context,
+            target_text=chunk.text,
+            next_context=next_context,
+        )
+
+        connection.execute(
+            """
+            INSERT INTO narrative_unit_analyses (
+                run_id,
+                project_id,
+                chunk_database_id,
+                chunk_id,
+                text_hash,
+                analysis_input_hash,
+                status,
+                provider,
+                model,
+                prompt_version,
+                schema_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                project_id,
+                chunk.database_id,
+                chunk.chunk_id,
+                compute_text_hash(chunk.text),
+                analysis_input_hash,
+                "pending",
+                provider.provider_name,
+                provider.model_name,
+                PROMPT_VERSION,
+                SCHEMA_VERSION,
+            ),
+        )
+
+
 def _create_analysis_run(
     *,
     project_id: str,
     provider: LLMProvider,
     database_path: DatabasePath | None,
+    status: str = ANALYSIS_STATUS_RUNNING,
+    total_chunks: int = 0,
+    request_json: str | None = None,
 ) -> int:
     with database_session(database_path=database_path) as connection:
         cursor = connection.execute(
@@ -303,9 +474,11 @@ def _create_analysis_run(
                 model,
                 prompt_version,
                 schema_version,
-                status
+                status,
+                total_chunks,
+                request_json
             )
-            VALUES (?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -313,7 +486,9 @@ def _create_analysis_run(
                 provider.model_name,
                 PROMPT_VERSION,
                 SCHEMA_VERSION,
-                ANALYSIS_STATUS_RUNNING,
+                status,
+                total_chunks,
+                request_json,
             ),
         )
 
@@ -325,6 +500,115 @@ def _create_analysis_run(
             )
 
         return run_id
+
+
+def create_narrative_analysis_job(
+    *,
+    project_id: str,
+    provider: LLMProvider,
+    database_path: DatabasePath | None = None,
+    max_chunks: int | None = None,
+    previous_context_chars: int = 500,
+    next_context_chars: int = 0,
+    force_reanalyze: bool = False,
+) -> NarrativeAnalysisResult:
+    normalized_project_id = project_id.strip()
+
+    if not normalized_project_id:
+        raise ValueError("project_id cannot be empty.")
+
+    chunks = _load_project_chunks(
+        project_id=normalized_project_id,
+        database_path=database_path,
+    )
+
+    if max_chunks is not None:
+        if max_chunks <= 0:
+            raise ValueError("max_chunks must be greater than 0.")
+
+        chunks = chunks[:max_chunks]
+
+    request_json = json.dumps(
+        {
+            "max_chunks": max_chunks,
+            "previous_context_chars": previous_context_chars,
+            "next_context_chars": next_context_chars,
+            "force_reanalyze": force_reanalyze,
+        },
+        ensure_ascii=False,
+    )
+
+    with database_session(database_path=database_path) as connection:
+        active_run_id = _get_active_run_id(
+            connection=connection,
+            project_id=normalized_project_id,
+        )
+
+        if active_run_id is not None:
+            raise ActiveNarrativeAnalysisError(active_run_id)
+
+        try:
+            cursor = connection.execute(
+                """
+                INSERT INTO narrative_analysis_runs (
+                    project_id,
+                    provider,
+                    model,
+                    prompt_version,
+                    schema_version,
+                    status,
+                    total_chunks,
+                    request_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized_project_id,
+                    provider.provider_name,
+                    provider.model_name,
+                    PROMPT_VERSION,
+                    SCHEMA_VERSION,
+                    ANALYSIS_STATUS_QUEUED,
+                    len(chunks),
+                    request_json,
+                ),
+            )
+        except sqlite3.IntegrityError as error:
+            active_run_id = _get_active_run_id(
+                connection=connection,
+                project_id=normalized_project_id,
+            )
+            raise ActiveNarrativeAnalysisError(
+                active_run_id or 0
+            ) from error
+
+        run_id = cursor.lastrowid
+
+        if run_id is None:
+            raise RuntimeError("Could not create narrative analysis run.")
+
+        _precreate_pending_units(
+            connection=connection,
+            run_id=run_id,
+            project_id=normalized_project_id,
+            chunks=chunks,
+            provider=provider,
+            previous_context_chars=previous_context_chars,
+            next_context_chars=next_context_chars,
+        )
+
+    return NarrativeAnalysisResult(
+        run_id=int(run_id),
+        project_id=normalized_project_id,
+        status=ANALYSIS_STATUS_QUEUED,
+        total_chunks=len(chunks),
+        processed_chunks=0,
+        successful_chunks=0,
+        failed_chunks=0,
+        partial_chunks=0,
+        cached_chunks=0,
+        cached_layers=0,
+    )
 
 
 def _update_analysis_run(
@@ -390,6 +674,25 @@ def _save_unit_analysis(
                 error_message
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (
+                run_id,
+                chunk_database_id
+            )
+            DO UPDATE SET
+                text_hash = excluded.text_hash,
+                analysis_input_hash = excluded.analysis_input_hash,
+                status = excluded.status,
+                cache_hit = excluded.cache_hit,
+                cache_source_unit_id = excluded.cache_source_unit_id,
+                provider = excluded.provider,
+                model = excluded.model,
+                prompt_version = excluded.prompt_version,
+                schema_version = excluded.schema_version,
+                result_json = excluded.result_json,
+                validated_result_json = excluded.validated_result_json,
+                error_message = excluded.error_message,
+                last_finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
             """,
             (
                 run_id,
@@ -409,6 +712,225 @@ def _save_unit_analysis(
                 validated_result_json,
                 error_message,
             ),
+        )
+
+        _refresh_run_progress(
+            connection=connection,
+            run_id=run_id,
+            current_chunk_id=None,
+        )
+
+
+def _mark_unit_running(
+    *,
+    run_id: int,
+    chunk: NarrativeChunk,
+    database_path: DatabasePath | None,
+) -> None:
+    with database_session(database_path=database_path) as connection:
+        connection.execute(
+            """
+            UPDATE narrative_unit_analyses
+            SET
+                status = ?,
+                attempt_count = attempt_count + 1,
+                last_started_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+              AND chunk_database_id = ?
+            """,
+            (
+                ANALYSIS_STATUS_RUNNING,
+                run_id,
+                chunk.database_id,
+            ),
+        )
+        _refresh_run_progress(
+            connection=connection,
+            run_id=run_id,
+            current_chunk_id=chunk.chunk_id,
+        )
+
+
+def _refresh_run_progress(
+    *,
+    connection: sqlite3.Connection,
+    run_id: int,
+    current_chunk_id: str | None,
+) -> None:
+    row = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS total_chunks,
+            SUM(CASE WHEN status IN ('completed', 'partial', 'failed') THEN 1 ELSE 0 END) AS processed_chunks,
+            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS successful_chunks,
+            SUM(CASE WHEN status = 'partial' THEN 1 ELSE 0 END) AS partial_chunks,
+            SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_chunks,
+            SUM(CASE WHEN cache_hit = 1 THEN 1 ELSE 0 END) AS cached_chunks
+        FROM narrative_unit_analyses
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+    connection.execute(
+        """
+        UPDATE narrative_analysis_runs
+        SET
+            total_chunks = ?,
+            processed_chunks = ?,
+            successful_chunks = ?,
+            partial_chunks = ?,
+            failed_chunks = ?,
+            cached_chunks = ?,
+            current_chunk_id = COALESCE(?, current_chunk_id),
+            heartbeat_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (
+            row["total_chunks"] or 0,
+            row["processed_chunks"] or 0,
+            row["successful_chunks"] or 0,
+            row["partial_chunks"] or 0,
+            row["failed_chunks"] or 0,
+            row["cached_chunks"] or 0,
+            current_chunk_id,
+            run_id,
+        ),
+    )
+
+
+def _increment_run_cached_layers(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None,
+) -> None:
+    with database_session(database_path=database_path) as connection:
+        connection.execute(
+            """
+            UPDATE narrative_analysis_runs
+            SET
+                cached_layers = cached_layers + 1,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (run_id,),
+        )
+
+
+def _summarize_run_from_connection(
+    *,
+    connection: sqlite3.Connection,
+    run_id: int,
+    status: str | None = None,
+) -> NarrativeAnalysisResult:
+    run_row = connection.execute(
+        """
+        SELECT
+            project_id,
+            status,
+            total_chunks,
+            processed_chunks,
+            successful_chunks,
+            partial_chunks,
+            failed_chunks,
+            cached_chunks,
+            cached_layers
+        FROM narrative_analysis_runs
+        WHERE id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+    if run_row is None:
+        raise LookupError(
+            f"Narrative analysis run does not exist: {run_id}"
+        )
+
+    return NarrativeAnalysisResult(
+        run_id=run_id,
+        project_id=str(run_row["project_id"]),
+        status=status or str(run_row["status"]),
+        total_chunks=int(run_row["total_chunks"] or 0),
+        processed_chunks=int(run_row["processed_chunks"] or 0),
+        successful_chunks=int(run_row["successful_chunks"] or 0),
+        failed_chunks=int(run_row["failed_chunks"] or 0),
+        partial_chunks=int(run_row["partial_chunks"] or 0),
+        cached_chunks=int(run_row["cached_chunks"] or 0),
+        cached_layers=int(run_row["cached_layers"] or 0),
+    )
+
+
+def _finalize_analysis_run(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None,
+    error_message: str | None = None,
+) -> NarrativeAnalysisResult:
+    with database_session(database_path=database_path) as connection:
+        _refresh_run_progress(
+            connection=connection,
+            run_id=run_id,
+            current_chunk_id=None,
+        )
+        row = connection.execute(
+            """
+            SELECT
+                total_chunks,
+                processed_chunks,
+                successful_chunks,
+                partial_chunks,
+                failed_chunks
+            FROM narrative_analysis_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        if row is None:
+            raise LookupError(
+                f"Narrative analysis run does not exist: {run_id}"
+            )
+
+        total_chunks = int(row["total_chunks"] or 0)
+        processed_chunks = int(row["processed_chunks"] or 0)
+        successful_chunks = int(row["successful_chunks"] or 0)
+        partial_chunks = int(row["partial_chunks"] or 0)
+        failed_chunks = int(row["failed_chunks"] or 0)
+
+        if processed_chunks < total_chunks:
+            final_status = ANALYSIS_STATUS_PARTIAL
+        elif failed_chunks == 0 and partial_chunks == 0:
+            final_status = ANALYSIS_STATUS_COMPLETED
+        elif successful_chunks == 0 and partial_chunks == 0:
+            final_status = ANALYSIS_STATUS_FAILED
+        else:
+            final_status = ANALYSIS_STATUS_PARTIAL
+
+        connection.execute(
+            """
+            UPDATE narrative_analysis_runs
+            SET
+                status = ?,
+                error_message = ?,
+                current_chunk_id = NULL,
+                finished_at = CURRENT_TIMESTAMP,
+                heartbeat_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                final_status,
+                error_message,
+                run_id,
+            ),
+        )
+
+        return _summarize_run_from_connection(
+            connection=connection,
+            run_id=run_id,
+            status=final_status,
         )
 
 
@@ -1362,6 +1884,7 @@ async def analyze_project_narrative(
     previous_context_chars: int = 500,
     next_context_chars: int = 0,
     force_reanalyze: bool = False,
+    existing_run_id: int | None = None,
 ) -> NarrativeAnalysisResult:
     """
     Analyze saved text chunks and persist raw plus evidence-validated results.
@@ -1392,11 +1915,46 @@ async def analyze_project_narrative(
     else:
         resolved_provider = provider
 
-    run_id = _create_analysis_run(
-        project_id=normalized_project_id,
-        provider=resolved_provider,
-        database_path=database_path,
-    )
+    all_chunks = list(chunks)
+
+    if existing_run_id is None:
+        request_json = json.dumps(
+            {
+                "max_chunks": max_chunks,
+                "previous_context_chars": previous_context_chars,
+                "next_context_chars": next_context_chars,
+                "force_reanalyze": force_reanalyze,
+            },
+            ensure_ascii=False,
+        )
+        run_id = _create_analysis_run(
+            project_id=normalized_project_id,
+            provider=resolved_provider,
+            database_path=database_path,
+            status=ANALYSIS_STATUS_RUNNING,
+            total_chunks=len(chunks),
+            request_json=request_json,
+        )
+    else:
+        run_id = existing_run_id
+        pending_chunk_ids = _get_pending_chunk_database_ids(
+            run_id=run_id,
+            database_path=database_path,
+        )
+        chunks = [
+            chunk
+            for chunk in chunks
+            if chunk.database_id in pending_chunk_ids
+        ]
+
+    processing_items = [
+        (
+            index,
+            chunk,
+        )
+        for index, chunk in enumerate(all_chunks)
+        if chunk in chunks
+    ]
 
     successful_chunks = 0
     failed_chunks = 0
@@ -1406,10 +1964,28 @@ async def analyze_project_narrative(
     run_error_message: str | None = None
 
     try:
-        for index, chunk in enumerate(chunks):
+        with database_session(database_path=database_path) as connection:
+            connection.execute(
+                """
+                UPDATE narrative_analysis_runs
+                SET
+                    status = ?,
+                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                    finished_at = NULL,
+                    heartbeat_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (
+                    ANALYSIS_STATUS_RUNNING,
+                    run_id,
+                ),
+            )
+
+        for index, chunk in processing_items:
             text_hash = compute_text_hash(chunk.text)
             previous_context, next_context = _build_contexts(
-                chunks=chunks,
+                chunks=all_chunks,
                 index=index,
                 previous_context_chars=previous_context_chars,
                 next_context_chars=next_context_chars,
@@ -1421,6 +1997,12 @@ async def analyze_project_narrative(
             )
 
             try:
+                _mark_unit_running(
+                    run_id=run_id,
+                    chunk=chunk,
+                    database_path=database_path,
+                )
+
                 cached_unit = None
 
                 if not force_reanalyze:
@@ -1533,6 +2115,10 @@ async def analyze_project_narrative(
                     )
                 else:
                     cached_layers += 1
+                    _increment_run_cached_layers(
+                        run_id=run_id,
+                        database_path=database_path,
+                    )
                     mention_raw_result = json.loads(
                         cached_mentions["result_json"]
                     )
@@ -1703,6 +2289,10 @@ async def analyze_project_narrative(
                             )
                     else:
                         cached_layers += 1
+                        _increment_run_cached_layers(
+                            run_id=run_id,
+                            database_path=database_path,
+                        )
                         layer_statuses["relations"] = "cached"
                         relation_raw_result = json.loads(
                             cached_relations["result_json"]
@@ -1814,6 +2404,10 @@ async def analyze_project_narrative(
                             )
                     else:
                         cached_layers += 1
+                        _increment_run_cached_layers(
+                            run_id=run_id,
+                            database_path=database_path,
+                        )
                         layer_statuses["event_frames"] = "cached"
                         event_frame_raw_result = json.loads(
                             cached_event_frames["result_json"]
@@ -1993,6 +2587,10 @@ async def analyze_project_narrative(
                                 )
                         else:
                             cached_layers += 1
+                            _increment_run_cached_layers(
+                                run_id=run_id,
+                                database_path=database_path,
+                            )
                             layer_statuses["character_candidates"] = (
                                 "cached"
                             )
@@ -2132,25 +2730,24 @@ async def analyze_project_narrative(
                     database_path=database_path,
                 )
 
-        if failed_chunks == 0 and partial_chunks == 0:
-            final_status = ANALYSIS_STATUS_COMPLETED
-        elif successful_chunks == 0:
-            final_status = ANALYSIS_STATUS_FAILED
-        else:
-            final_status = ANALYSIS_STATUS_PARTIAL
+        if existing_run_id is not None:
+            return _finalize_analysis_run(
+                run_id=run_id,
+                database_path=database_path,
+                error_message=run_error_message,
+            )
 
-        _update_analysis_run(
+        finalized_result = _finalize_analysis_run(
             run_id=run_id,
-            status=final_status,
-            error_message=run_error_message,
             database_path=database_path,
+            error_message=run_error_message,
         )
-
         return NarrativeAnalysisResult(
-            run_id=run_id,
-            project_id=normalized_project_id,
-            status=final_status,
-            total_chunks=len(chunks),
+            run_id=finalized_result.run_id,
+            project_id=finalized_result.project_id,
+            status=finalized_result.status,
+            total_chunks=finalized_result.total_chunks,
+            processed_chunks=finalized_result.processed_chunks,
             successful_chunks=successful_chunks,
             failed_chunks=failed_chunks,
             partial_chunks=partial_chunks,
@@ -2163,10 +2760,352 @@ async def analyze_project_narrative(
             await resolved_provider.close()
 
 
+async def execute_narrative_analysis_job(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None = None,
+    provider: LLMProvider | None = None,
+) -> NarrativeAnalysisResult:
+    project_id, request = _get_run_request(
+        run_id=run_id,
+        database_path=database_path,
+    )
+
+    with database_session(database_path=database_path) as connection:
+        run_row = connection.execute(
+            """
+            SELECT status
+            FROM narrative_analysis_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        if run_row is None:
+            raise LookupError(
+                f"Narrative analysis run does not exist: {run_id}"
+            )
+
+        if run_row["status"] not in {
+            ANALYSIS_STATUS_QUEUED,
+            ANALYSIS_STATUS_RUNNING,
+            ANALYSIS_STATUS_INTERRUPTED,
+        }:
+            return _summarize_run_from_connection(
+                connection=connection,
+                run_id=run_id,
+            )
+
+        connection.execute(
+            """
+            UPDATE narrative_unit_analyses
+            SET
+                status = 'pending',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+              AND status = 'running'
+            """,
+            (run_id,),
+        )
+
+    return await analyze_project_narrative(
+        project_id=project_id,
+        database_path=database_path,
+        provider=provider,
+        max_chunks=request.get("max_chunks"),
+        previous_context_chars=int(
+            request.get("previous_context_chars", 500)
+        ),
+        next_context_chars=int(request.get("next_context_chars", 0)),
+        force_reanalyze=bool(request.get("force_reanalyze", False)),
+        existing_run_id=run_id,
+    )
+
+
+def recover_analysis_jobs(
+    *,
+    database_path: DatabasePath | None = None,
+) -> list[int]:
+    with database_session(database_path=database_path) as connection:
+        connection.execute(
+            """
+            UPDATE narrative_unit_analyses
+            SET
+                status = 'pending',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'running'
+              AND run_id IN (
+                  SELECT id
+                  FROM narrative_analysis_runs
+                  WHERE status = 'running'
+              )
+            """
+        )
+        connection.execute(
+            """
+            UPDATE narrative_analysis_runs
+            SET
+                status = ?,
+                current_chunk_id = NULL,
+                finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = ?
+            """,
+            (
+                ANALYSIS_STATUS_INTERRUPTED,
+                ANALYSIS_STATUS_RUNNING,
+            ),
+        )
+        rows = connection.execute(
+            """
+            SELECT id
+            FROM narrative_analysis_runs
+            WHERE status = ?
+            ORDER BY id
+            """,
+            (ANALYSIS_STATUS_QUEUED,),
+        ).fetchall()
+
+    return [
+        int(row["id"])
+        for row in rows
+    ]
+
+
+def mark_narrative_analysis_job_failed(
+    *,
+    run_id: int,
+    error_message: str,
+    database_path: DatabasePath | None = None,
+) -> None:
+    with database_session(database_path=database_path) as connection:
+        connection.execute(
+            """
+            UPDATE narrative_unit_analyses
+            SET
+                status = 'failed',
+                error_message = COALESCE(error_message, ?),
+                last_finished_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+              AND status = 'running'
+            """,
+            (
+                error_message,
+                run_id,
+            ),
+        )
+        _refresh_run_progress(
+            connection=connection,
+            run_id=run_id,
+            current_chunk_id=None,
+        )
+        connection.execute(
+            """
+            UPDATE narrative_analysis_runs
+            SET
+                status = ?,
+                error_message = ?,
+                current_chunk_id = NULL,
+                finished_at = CURRENT_TIMESTAMP,
+                heartbeat_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+              AND status IN (?, ?)
+            """,
+            (
+                ANALYSIS_STATUS_FAILED,
+                error_message,
+                run_id,
+                ANALYSIS_STATUS_QUEUED,
+                ANALYSIS_STATUS_RUNNING,
+            ),
+        )
+
+
+def resume_narrative_analysis_job(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None = None,
+) -> NarrativeAnalysisResult:
+    with database_session(database_path=database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT status
+            FROM narrative_analysis_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        if row is None:
+            raise LookupError(
+                f"Narrative analysis run does not exist: {run_id}"
+            )
+
+        if row["status"] != ANALYSIS_STATUS_INTERRUPTED:
+            raise ValueError("Only interrupted analysis jobs can be resumed.")
+
+        connection.execute(
+            """
+            UPDATE narrative_unit_analyses
+            SET
+                status = 'pending',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+              AND status = 'running'
+            """,
+            (run_id,),
+        )
+        connection.execute(
+            """
+            UPDATE narrative_analysis_runs
+            SET
+                status = ?,
+                error_message = NULL,
+                finished_at = NULL,
+                current_chunk_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                ANALYSIS_STATUS_QUEUED,
+                run_id,
+            ),
+        )
+        _refresh_run_progress(
+            connection=connection,
+            run_id=run_id,
+            current_chunk_id=None,
+        )
+
+        return _summarize_run_from_connection(
+            connection=connection,
+            run_id=run_id,
+            status=ANALYSIS_STATUS_QUEUED,
+        )
+
+
+def retry_failed_narrative_analysis_job(
+    *,
+    run_id: int,
+    database_path: DatabasePath | None = None,
+) -> NarrativeAnalysisResult:
+    with database_session(database_path=database_path) as connection:
+        _get_run_project_id(
+            connection=connection,
+            run_id=run_id,
+        )
+        run_row = connection.execute(
+            """
+            SELECT status
+            FROM narrative_analysis_runs
+            WHERE id = ?
+            """,
+            (run_id,),
+        ).fetchone()
+
+        if run_row is None:
+            raise LookupError(
+                f"Narrative analysis run does not exist: {run_id}"
+            )
+
+        if run_row["status"] in {
+            ANALYSIS_STATUS_QUEUED,
+            ANALYSIS_STATUS_RUNNING,
+        }:
+            raise ValueError(
+                "Running analysis jobs cannot retry failed chunks."
+            )
+
+        connection.execute(
+            """
+            UPDATE narrative_unit_analyses
+            SET
+                status = 'pending',
+                result_json = NULL,
+                validated_result_json = NULL,
+                error_message = NULL,
+                cache_hit = 0,
+                cache_source_unit_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+              AND status = 'failed'
+            """,
+            (run_id,),
+        )
+        connection.execute(
+            """
+            UPDATE narrative_analysis_runs
+            SET
+                status = ?,
+                error_message = NULL,
+                finished_at = NULL,
+                current_chunk_id = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                ANALYSIS_STATUS_QUEUED,
+                run_id,
+            ),
+        )
+        _refresh_run_progress(
+            connection=connection,
+            run_id=run_id,
+            current_chunk_id=None,
+        )
+
+        return _summarize_run_from_connection(
+            connection=connection,
+            run_id=run_id,
+            status=ANALYSIS_STATUS_QUEUED,
+        )
+
+
+def get_active_narrative_analysis_run(
+    *,
+    project_id: str,
+    database_path: DatabasePath | None = None,
+) -> dict[str, Any] | None:
+    normalized_project_id = project_id.strip()
+
+    if not normalized_project_id:
+        raise ValueError("project_id cannot be empty.")
+
+    with database_session(database_path=database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT id
+            FROM narrative_analysis_runs
+            WHERE project_id = ?
+              AND status IN (?, ?, ?)
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (
+                normalized_project_id,
+                ANALYSIS_STATUS_QUEUED,
+                ANALYSIS_STATUS_RUNNING,
+                ANALYSIS_STATUS_INTERRUPTED,
+            ),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return get_narrative_analysis_run(
+        run_id=int(row["id"]),
+        database_path=database_path,
+        include_units=False,
+    )
+
+
 def get_narrative_analysis_run(
     *,
     run_id: int,
     database_path: DatabasePath | None = None,
+    include_units: bool = True,
 ) -> dict[str, Any]:
     with database_session(database_path=database_path) as connection:
         run_row = connection.execute(
@@ -2180,6 +3119,18 @@ def get_narrative_analysis_run(
                 schema_version,
                 status,
                 error_message,
+                total_chunks,
+                processed_chunks,
+                successful_chunks,
+                partial_chunks,
+                failed_chunks,
+                cached_chunks,
+                cached_layers,
+                current_chunk_id,
+                request_json,
+                started_at,
+                finished_at,
+                heartbeat_at,
                 created_at,
                 updated_at
             FROM narrative_analysis_runs
@@ -2193,28 +3144,34 @@ def get_narrative_analysis_run(
                 f"Narrative analysis run does not exist: {run_id}"
             )
 
-        unit_rows = connection.execute(
-            """
-            SELECT
-                id,
-                chunk_database_id,
-                chunk_id,
-                text_hash,
-                analysis_input_hash,
-                status,
-                cache_hit,
-                cache_source_unit_id,
-                result_json,
-                validated_result_json,
-                error_message,
-                created_at,
-                updated_at
-            FROM narrative_unit_analyses
-            WHERE run_id = ?
-            ORDER BY id
-            """,
-            (run_id,),
-        ).fetchall()
+        unit_rows = []
+
+        if include_units:
+            unit_rows = connection.execute(
+                """
+                SELECT
+                    id,
+                    chunk_database_id,
+                    chunk_id,
+                    text_hash,
+                    analysis_input_hash,
+                    status,
+                    cache_hit,
+                    cache_source_unit_id,
+                    result_json,
+                    validated_result_json,
+                    error_message,
+                    attempt_count,
+                    last_started_at,
+                    last_finished_at,
+                    created_at,
+                    updated_at
+                FROM narrative_unit_analyses
+                WHERE run_id = ?
+                ORDER BY id
+                """,
+                (run_id,),
+            ).fetchall()
 
         return {
             "id": run_row["id"],
@@ -2225,6 +3182,18 @@ def get_narrative_analysis_run(
             "schema_version": run_row["schema_version"],
             "status": run_row["status"],
             "error_message": run_row["error_message"],
+            "total_chunks": run_row["total_chunks"],
+            "processed_chunks": run_row["processed_chunks"],
+            "successful_chunks": run_row["successful_chunks"],
+            "partial_chunks": run_row["partial_chunks"],
+            "failed_chunks": run_row["failed_chunks"],
+            "cached_chunks": run_row["cached_chunks"],
+            "cached_layers": run_row["cached_layers"],
+            "current_chunk_id": run_row["current_chunk_id"],
+            "request_json": run_row["request_json"],
+            "started_at": run_row["started_at"],
+            "finished_at": run_row["finished_at"],
+            "heartbeat_at": run_row["heartbeat_at"],
             "created_at": run_row["created_at"],
             "updated_at": run_row["updated_at"],
             "units": [
@@ -2244,6 +3213,9 @@ def get_narrative_analysis_run(
                         "validated_result_json"
                     ],
                     "error_message": row["error_message"],
+                    "attempt_count": row["attempt_count"],
+                    "last_started_at": row["last_started_at"],
+                    "last_finished_at": row["last_finished_at"],
                     "created_at": row["created_at"],
                     "updated_at": row["updated_at"],
                 }
